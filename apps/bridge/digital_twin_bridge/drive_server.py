@@ -61,6 +61,31 @@ class DynamicActorMeta:
     message: str
 
 
+def blueprint_wheel_count(blueprint, default: int = 4) -> int:
+    """Return CARLA blueprint wheel count across real and mocked attributes."""
+    if not blueprint.has_attribute("number_of_wheels"):
+        return default
+
+    attr = blueprint.get_attribute("number_of_wheels")
+    try:
+        if hasattr(attr, "as_int"):
+            return int(attr.as_int())
+        values = getattr(attr, "recommended_values", None)
+        if values:
+            return int(values[0])
+        value = getattr(attr, "value", None)
+        if value is not None:
+            return int(value)
+        return int(attr)
+    except Exception:
+        text = str(attr)
+        import re as _re
+        match = _re.search(r"value=([-+]?\d+)", text)
+        if match:
+            return int(match.group(1))
+        raise
+
+
 def get_available_vehicles(world) -> list[dict]:
     """Query CARLA for all spawnable vehicle blueprints."""
     bp_lib = world.get_blueprint_library()
@@ -79,7 +104,7 @@ def get_available_vehicles(world) -> list[dict]:
         # Get number of wheels to filter out bikes if desired
         num_wheels = 4
         try:
-            num_wheels = int(bp.get_attribute("number_of_wheels").recommended_values[0]) if bp.has_attribute("number_of_wheels") else 4
+            num_wheels = blueprint_wheel_count(bp)
         except Exception:
             pass
 
@@ -878,12 +903,8 @@ class DriveSession:
         if bp is None:
             raise ValueError(f"Blueprint not found: {blueprint_id}")
 
-        if bp.has_attribute("number_of_wheels"):
-            wheels_attr = bp.get_attribute("number_of_wheels")
-            wheels_values = getattr(wheels_attr, "recommended_values", None)
-            wheels_value = wheels_values[0] if wheels_values else str(wheels_attr)
-            if int(wheels_value) != 4:
-                raise ValueError("Dynamic actors must be four-wheeled vehicles")
+        if blueprint_wheel_count(bp) != 4:
+            raise ValueError("Dynamic actors must be four-wheeled vehicles")
 
         radius = max(5.0, min(250.0, float(geofence_radius)))
         actor_name = display_name_from_blueprint(blueprint_id)
@@ -1050,7 +1071,7 @@ class DriveSession:
 
         bp_lib = self._world.get_blueprint_library()
         vehicle_bps = [bp for bp in bp_lib.filter("vehicle.*")
-                       if int(bp.get_attribute("number_of_wheels")) == 4]
+                       if blueprint_wheel_count(bp) == 4]
 
         spawn_points = self._map.get_spawn_points()
         # Drop spawn points sitting on top of the player, the trajectory

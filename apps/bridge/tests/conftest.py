@@ -119,6 +119,9 @@ class MockBlueprintAttribute:
         self.value = value
         self.recommended_values = recommended_values or [value]
 
+    def as_int(self) -> int:
+        return int(self.value)
+
     def __int__(self) -> int:
         return int(self.value)
 

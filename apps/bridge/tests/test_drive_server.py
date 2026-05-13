@@ -399,6 +399,30 @@ class TestScenarioZonePersistence:
 
 @pytest.mark.unit
 class TestDynamicActorGeofences:
+    def test_wheel_count_parses_real_carla_actor_attribute_string(self):
+        from digital_twin_bridge.drive_server import blueprint_wheel_count
+        from tests.conftest import MockBlueprintAttribute, MockBlueprint
+
+        class RealisticActorAttribute(MockBlueprintAttribute):
+            recommended_values = []
+
+            def __init__(self):
+                self.value = "4"
+                self.recommended_values = []
+
+            def as_int(self):
+                return 4
+
+            def __str__(self):
+                return "ActorAttribute(id=number_of_wheels,type=int,value=4(const))"
+
+        bp = MockBlueprint(
+            "vehicle.carlamotors.firetruck",
+            {"number_of_wheels": RealisticActorAttribute()},
+        )
+
+        assert blueprint_wheel_count(bp) == 4
+
     @pytest.mark.asyncio
     async def test_spawn_dynamic_actor_sets_autopilot_and_emits_telemetry(self, mock_world, fake_v2x_api):
         from digital_twin_bridge.drive_server import DriveSession
