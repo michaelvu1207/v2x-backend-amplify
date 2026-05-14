@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTAINER="${CARLA_CONTAINER:-carla-custommaps}"
+CONTAINER="${CARLA_CONTAINER:-carla-sanramon}"
 CARLA_HOST="${CARLA_HOST:-localhost}"
 CARLA_PORT="${CARLA_PORT:-2000}"
 TIMEOUT_SECONDS="${CARLA_WAIT_TIMEOUT:-600}"

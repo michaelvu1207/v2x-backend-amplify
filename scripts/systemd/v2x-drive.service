@@ -12,6 +12,7 @@ Group=path
 SupplementaryGroups=docker
 WorkingDirectory=/home/path/V2XCarla/v2x-backend
 Environment=AWS_PROFILE=Path-Emerging-Dev-147229569658
+Environment=CARLA_CONTAINER=carla-sanramon
 Environment=CARLA_PORT=2000
 Environment=WS_PORT=8765
 Environment=VENV=/home/path/V2XCarla/carla-venv/bin/activate
