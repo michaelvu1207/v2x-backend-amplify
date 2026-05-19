@@ -1,6 +1,21 @@
 @import 'tailwindcss';
+@import '@fontsource-variable/inter';
 
 :root {
+	/* ── Tesla cluster palette (driver dashboard HUD strip) ── */
+	--color-tesla-bg: #0a0a0c;
+	--color-tesla-bg-elevated: #181b21;
+	--color-tesla-text: #ffffff;
+	--color-tesla-text-secondary: #9ca3af;
+	--color-tesla-text-muted: #8a8f98;
+	--color-tesla-divider: #3a3f47;
+	--color-tesla-accent: #3e82f7;
+	--color-tesla-active: #22c55e;
+	--color-tesla-warning: #f5a524;
+	--color-tesla-critical: #e82127;
+	--color-tesla-vehicle: #c8ccd1;
+	--color-tesla-traffic: #5a6068;
+
 	--color-cone: #ff8c00;
 	--color-vehicle: #0078ff;
 	--color-walker: #00c850;
@@ -22,6 +37,21 @@
 	--font-display: 'Syncopate', sans-serif;
 	--font-mono: 'Space Mono', monospace;
 	--font-body: 'Space Mono', monospace;
+	--font-tesla: 'Inter Variable', 'Inter', system-ui, sans-serif;
+
+	/* Tesla cluster palette mirrors :root for Tailwind utility access */
+	--color-tesla-bg: #0a0a0c;
+	--color-tesla-bg-elevated: #181b21;
+	--color-tesla-text: #ffffff;
+	--color-tesla-text-secondary: #9ca3af;
+	--color-tesla-text-muted: #8a8f98;
+	--color-tesla-divider: #3a3f47;
+	--color-tesla-accent: #3e82f7;
+	--color-tesla-active: #22c55e;
+	--color-tesla-warning: #f5a524;
+	--color-tesla-critical: #e82127;
+	--color-tesla-vehicle: #c8ccd1;
+	--color-tesla-traffic: #5a6068;
 
 	--color-cone: #ff8c00;
 	--color-vehicle: #0078ff;
