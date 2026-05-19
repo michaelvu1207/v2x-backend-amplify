@@ -56,7 +56,7 @@
 	import CalibrationWizard from '$lib/components/CalibrationWizard.svelte';
 	import CameraViewComponent from '$lib/components/CameraView.svelte';
 	import HudOverlay from '$lib/components/HudOverlay.svelte';
-	import V2xToast from '$lib/components/V2xToast.svelte';
+	// V2xToast removed — warnings now stack into the DriverDashboard center stack.
 	import V2xSignalPlacer from '$lib/components/V2xSignalPlacer.svelte';
 	import V2xZoneEditor from '$lib/components/V2xZoneEditor.svelte';
 	import DriveMiniMap from '$lib/components/DriveMiniMap.svelte';
@@ -697,9 +697,6 @@
 						fullPanel={false}
 					/>
 				{/if}
-
-				<!-- V2X toast notifications -->
-				<V2xToast />
 
 				<!-- Camera switcher (top-right) -->
 				<div class="absolute top-4 right-4 z-20 flex items-center gap-0.5 bg-black/40 backdrop-blur-md rounded-xl border border-white/10 p-1 shadow-lg pointer-events-auto">
