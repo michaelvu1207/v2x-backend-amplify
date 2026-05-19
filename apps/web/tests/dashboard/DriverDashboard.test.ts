@@ -80,17 +80,8 @@ describe('DriverDashboard', () => {
 		expect(getByTestId('gear-n').dataset.active).toBe('true');
 	});
 
-	it('propagates nearby actors to the visualization', () => {
-		const { getByTestId } = render(DriverDashboard, {
-			props: {
-				telemetry: mkTelemetry({
-					nearby_actors: [{ id: 11, pos: [3, 4], yaw: 0, type: 'traffic' }],
-				}),
-				now: 0,
-			},
-		});
-		expect(getByTestId('nearby-11')).toBeInTheDocument();
-	});
+	// Vehicle-visualization removed by user request — the right side of
+	// the dashboard is now reserved for messages only.
 
 	it('shows warnings in the center stack', () => {
 		const { getByTestId } = render(DriverDashboard, {

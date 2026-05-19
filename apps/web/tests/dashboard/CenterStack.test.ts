@@ -3,22 +3,17 @@ import { render } from '@testing-library/svelte';
 import CenterStack from '$lib/components/dashboard/CenterStack.svelte';
 
 describe('CenterStack', () => {
-	it('renders both viz and warning stack containers', () => {
+	it('mounts an empty warning area when no warnings are passed', () => {
 		const { getByTestId } = render(CenterStack, {
-			props: { egoPos: [0, 0], egoYaw: 0, steer: 0, nearby: [], warnings: [], now: 0 },
+			props: { warnings: [], now: 0 },
 		});
 		expect(getByTestId('center-stack')).toBeInTheDocument();
-		expect(getByTestId('vehicle-viz')).toBeInTheDocument();
 		expect(getByTestId('warning-stack')).toBeInTheDocument();
 	});
 
-	it('renders warnings on top of viz', () => {
+	it('renders a warning passed in', () => {
 		const { getByTestId } = render(CenterStack, {
 			props: {
-				egoPos: [0, 0],
-				egoYaw: 0,
-				steer: 0,
-				nearby: [],
 				warnings: [
 					{
 						id: 'eva1',
@@ -34,26 +29,21 @@ describe('CenterStack', () => {
 		expect(getByTestId('warning-eva1')).toBeInTheDocument();
 	});
 
-	it('passes nearby vehicles to viz', () => {
-		const { getByTestId } = render(CenterStack, {
+	it('applies the now prop to the WarningStack for fade decisions', () => {
+		const { queryByTestId } = render(CenterStack, {
 			props: {
-				egoPos: [0, 0],
-				egoYaw: 0,
-				steer: 0,
-				nearby: [{ id: 5, pos: [3, 4], yaw: 0 }],
-				warnings: [],
-				now: 0,
+				warnings: [
+					{
+						id: 'stale',
+						message: 'Old alert',
+						severity: 'info',
+						source: 'scenario',
+						lastUpdate: 0,
+					},
+				],
+				now: 5000,
 			},
 		});
-		expect(getByTestId('nearby-5')).toBeInTheDocument();
-	});
-
-	it('passes steer to viz wheels', () => {
-		const { getByTestId } = render(CenterStack, {
-			props: { egoPos: [0, 0], egoYaw: 0, steer: 1, nearby: [], warnings: [], now: 0 },
-		});
-		// 1 * 28 = 28°
-		const wheel = getByTestId('ego-wheel-left');
-		expect(wheel.getAttribute('transform')).toContain('rotate(28)');
+		expect(queryByTestId('warning-stale')).toBeNull();
 	});
 });

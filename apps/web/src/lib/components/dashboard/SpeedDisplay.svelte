@@ -36,7 +36,7 @@
 	<span
 		class="relative font-tesla font-semibold leading-[0.9] tracking-tight text-white tabular-nums"
 		style="
-			font-size: clamp(4rem, 10vw, 7.5rem);
+			font-size: clamp(2.5rem, 5vw, 4rem);
 			font-feature-settings: 'tnum', 'ss01';
 			text-shadow:
 				0 0 18px rgba(255, 255, 255, 0.32),

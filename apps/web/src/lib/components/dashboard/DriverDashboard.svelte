@@ -1,5 +1,4 @@
 <script lang="ts" module>
-	import type { NearbyActor as TelemetryNearbyActor } from '$lib/types';
 	import type { Gear } from './GearColumn.svelte';
 	import type { DashboardWarning } from './WarningStack.svelte';
 
@@ -23,9 +22,9 @@
 	interface Props {
 		/** Latest telemetry from the bridge. May be null on initial mount. */
 		telemetry: VehicleTelemetry | null;
-		/** All active warnings (V2X, EVA, scenario, verdict, etc.). */
+		/** All active warnings (V2X, EVA, scenario verdict, etc.). */
 		warnings?: DashboardWarning[];
-		/** Override `now` for tests (skips the internal ticker). */
+		/** Override `now` for tests. */
 		now?: number;
 		/** Speed display unit. */
 		speedUnit?: 'mph' | 'kmh';
@@ -55,13 +54,6 @@
 	const throttle = $derived(telemetry?.throttle ?? 0);
 	const brake = $derived(telemetry?.brake ?? 0);
 	const steer = $derived(telemetry?.steer ?? 0);
-	const egoPos = $derived<[number, number]>(
-		telemetry ? [telemetry.pos[0], telemetry.pos[1]] : [0, 0]
-	);
-	const egoYaw = $derived(telemetry?.rot?.[1] ?? 0);
-	const nearby = $derived<TelemetryNearbyActor[]>(
-		telemetry?.nearby_actors ?? []
-	);
 </script>
 
 <div
@@ -89,7 +81,7 @@
 	></div>
 
 	<!-- Left: instrument cluster -->
-	<div class="shrink-0" style="width: 50%; min-width: 0;">
+	<div class="shrink-0" style="width: 60%; min-width: 0;">
 		<InstrumentCluster {speed} {gear} {throttle} {brake} {steer} {speedUnit} />
 	</div>
 
@@ -100,7 +92,7 @@
 		aria-hidden="true"
 	>
 		<div
-			class="absolute inset-y-4 left-0 w-px"
+			class="absolute inset-y-2 left-0 w-px"
 			style="
 				background: linear-gradient(180deg, transparent 0%, rgba(62, 130, 247, 0.55) 50%, transparent 100%);
 				filter: blur(2px);
@@ -108,15 +100,8 @@
 		></div>
 	</div>
 
-	<!-- Right: center stack (viz + warnings) -->
+	<!-- Right: messages only -->
 	<div class="grow relative" style="min-width: 0;">
-		<CenterStack
-			{egoPos}
-			{egoYaw}
-			{steer}
-			{nearby}
-			{warnings}
-			now={effectiveNow}
-		/>
+		<CenterStack {warnings} now={effectiveNow} />
 	</div>
 </div>
