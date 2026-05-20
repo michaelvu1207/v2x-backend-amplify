@@ -32,22 +32,26 @@
 	const STRAIGHT_END_Y = 14;   // y of guide endpoint when steer = 0
 	const TURNED_END_Y = 30;     // y of guide endpoint at full lock (lines shorten as they curve)
 	const TURN_OFFSET_PX = 36;   // how far the far end shifts horizontally at full lock
-	const CURVE_BULGE_PX = 14;   // how far the Bezier control point bulges sideways at full lock
 
 	// Endpoint y eases up as |s| increases (curved paths look shorter).
 	const endY = $derived(STRAIGHT_END_Y + Math.abs(s) * (TURNED_END_Y - STRAIGHT_END_Y));
 	// Lateral shift of the far end of each guide; positive shift = turn right.
 	const farShift = $derived(s * TURN_OFFSET_PX);
-	// Control-point bulge — same sign as steer, so the curve bows into the turn.
-	const bulge = $derived(s * CURVE_BULGE_PX);
 
 	const leftStartX = CX - CAR_HALF_WIDTH;
 	const rightStartX = CX + CAR_HALF_WIDTH;
 	const leftEndX = $derived(CX - LANE_HALF_WIDTH + farShift);
 	const rightEndX = $derived(CX + LANE_HALF_WIDTH + farShift);
 	const ctrlY = (CAR_TOP_Y + STRAIGHT_END_Y) / 2;
-	const leftCtrlX = $derived((leftStartX + leftEndX) / 2 + bulge);
-	const rightCtrlX = $derived((rightStartX + rightEndX) / 2 + bulge);
+
+	// Quadratic Bezier control point sits directly above the start point.
+	// That keeps the tangent VERTICAL at the car (forward) and pushes all
+	// the lateral motion to the tip end — so the lines stay straight near
+	// the car and fan outward in the direction of the turn (funnel shape,
+	// like Tesla's forward-path / backup-cam parking guidelines).
+	const leftCtrlX = leftStartX;
+	const rightCtrlX = rightStartX;
+	const centerCtrlX = CX;
 
 	const leftPath = $derived(
 		`M ${leftStartX},${CAR_TOP_Y} Q ${leftCtrlX},${ctrlY} ${leftEndX},${endY}`
@@ -58,7 +62,6 @@
 
 	// Center hint line between the two guides (subtle).
 	const centerEndX = $derived(CX + farShift);
-	const centerCtrlX = $derived(CX + bulge);
 	const centerPath = $derived(
 		`M ${CX},${CAR_TOP_Y} Q ${centerCtrlX},${ctrlY} ${centerEndX},${endY}`
 	);
