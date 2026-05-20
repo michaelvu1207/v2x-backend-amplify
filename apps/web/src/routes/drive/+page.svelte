@@ -686,10 +686,8 @@
 	{:else if state === 'driving'}
 		<!-- Tesla-style split layout: (camera + dashboard) left, map right -->
 		<div class="flex h-full w-full">
-			<!-- Left column: camera viewport + Tesla dashboard strip -->
-			<div class="flex flex-col flex-1 min-w-0 min-h-0 h-full">
-				<!-- Camera area (takes remaining height; absolute children overlay it) -->
-			<div class="relative flex-1 min-w-0 min-h-0 overflow-hidden">
+			<!-- Left: camera viewport with translucent dashboard overlay -->
+			<div class="relative flex-1 min-w-0 overflow-hidden">
 				<!-- Aspect-constrained camera viewport: container reshapes with the chosen aspect preset -->
 				<div class="absolute inset-0 flex items-center justify-center">
 					<div style="height: 100%; max-width: 100%; aspect-ratio: {$cameraAspect.w} / {$cameraAspect.h};">
@@ -823,10 +821,8 @@
 				{#if showTrajectoryPanel}
 					<TrajectoryPanel onClose={() => { showTrajectoryPanel = false; }} />
 				{/if}
-			</div>
-
-			<!-- Tesla-style driver dashboard strip below the camera viewport -->
-				<div class="shrink-0" style="height: 130px;">
+				<!-- Translucent dashboard overlay anchored at the bottom of the camera viewport -->
+				<div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 pointer-events-auto" style="width: 88%; height: 140px; max-width: 1180px;">
 					<DriverDashboardConnected />
 				</div>
 			</div>

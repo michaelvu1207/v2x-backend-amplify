@@ -33,8 +33,7 @@
 	class="relative flex h-full w-full font-tesla overflow-hidden items-center justify-between px-4 sm:px-6 gap-3"
 	style="
 		background:
-			radial-gradient(ellipse at 30% 0%, rgba(62, 130, 247, 0.06) 0%, transparent 55%),
-			linear-gradient(180deg, #0a0a0c 0%, #14171c 100%);
+			radial-gradient(ellipse at 30% 0%, rgba(62, 130, 247, 0.05) 0%, transparent 55%);
 	"
 	data-testid="instrument-cluster"
 >

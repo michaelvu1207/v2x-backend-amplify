@@ -14,7 +14,6 @@
 
 <div
 	class="relative w-full h-full overflow-hidden"
-	style="background: var(--color-tesla-bg);"
 	data-testid="center-stack"
 >
 	<WarningStack {warnings} {now} />
