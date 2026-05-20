@@ -690,8 +690,12 @@
 			<div class="relative flex-1 min-w-0 overflow-hidden">
 				<!-- Aspect-constrained camera viewport: container reshapes with the chosen aspect preset -->
 				<div class="absolute inset-0 flex items-center justify-center">
-					<div style="height: 100%; max-width: 100%; aspect-ratio: {$cameraAspect.w} / {$cameraAspect.h};">
+					<div class="relative" style="height: 100%; max-width: 100%; aspect-ratio: {$cameraAspect.w} / {$cameraAspect.h};">
 						<CameraViewComponent bind:this={cameraViewRef} activeView={activeCamera} onSwitchView={handleCameraSwitch} />
+						<!-- Dashboard overlay anchored to the visible camera frame (scales with aspect) -->
+						<div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 pointer-events-auto" style="width: 94%; height: 130px;">
+							<DriverDashboardConnected />
+						</div>
 					</div>
 				</div>
 				<HudOverlay telemetry={currentTelemetry} isRecording={true} />
@@ -821,10 +825,6 @@
 				{#if showTrajectoryPanel}
 					<TrajectoryPanel onClose={() => { showTrajectoryPanel = false; }} />
 				{/if}
-				<!-- Translucent dashboard overlay anchored at the bottom of the camera viewport -->
-				<div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 pointer-events-auto" style="width: 88%; height: 140px; max-width: 1180px;">
-					<DriverDashboardConnected />
-				</div>
 			</div>
 
 			<!-- Draggable divider -->

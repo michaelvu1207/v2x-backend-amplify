@@ -10,8 +10,9 @@ describe('InstrumentCluster', () => {
 		expect(getByTestId('instrument-cluster')).toBeInTheDocument();
 		expect(getByTestId('speed-display')).toBeInTheDocument();
 		expect(getByTestId('gear-column')).toBeInTheDocument();
-		expect(getByTestId('throttle-brake-bars')).toBeInTheDocument();
-		expect(getByTestId('steer-readout')).toBeInTheDocument();
+		expect(getByTestId('throttle-bar')).toBeInTheDocument();
+		expect(getByTestId('brake-bar')).toBeInTheDocument();
+		expect(getByTestId('steering-bar')).toBeInTheDocument();
 	});
 
 	it('passes speed through to SpeedDisplay (50 km/h ≈ 31 mph)', () => {
@@ -29,33 +30,38 @@ describe('InstrumentCluster', () => {
 		expect(getByTestId('gear-d').dataset.active).toBe('false');
 	});
 
-	it('converts CARLA steer (-1..1) to degree readout', () => {
-		const { getByTestId } = render(InstrumentCluster, {
-			props: { speed: 0, gear: 'D', throttle: 0, brake: 0, steer: 0.2 },
-		});
-		// 0.2 * 450 = 90
-		expect(getByTestId('steer-degrees').textContent).toBe('+90°');
-	});
-
-	it('displays negative steer with no extra sign besides the minus', () => {
-		const { getByTestId } = render(InstrumentCluster, {
-			props: { speed: 0, gear: 'D', throttle: 0, brake: 0, steer: -0.1 },
-		});
-		expect(getByTestId('steer-degrees').textContent).toBe('-45°');
-	});
-
-	it('shows 0° when steer is exactly 0', () => {
+	it('centers steering dot at zero steer', () => {
 		const { getByTestId } = render(InstrumentCluster, {
 			props: { speed: 0, gear: 'D', throttle: 0, brake: 0, steer: 0 },
 		});
-		expect(getByTestId('steer-degrees').textContent).toBe('0°');
+		expect(getByTestId('steering-dot').dataset.pct).toBe('50.0');
 	});
 
-	it('passes throttle/brake through to bars', () => {
+	it('moves steering dot left when steer is negative', () => {
 		const { getByTestId } = render(InstrumentCluster, {
-			props: { speed: 0, gear: 'D', throttle: 0.7, brake: 0.4, steer: 0 },
+			props: { speed: 0, gear: 'D', throttle: 0, brake: 0, steer: -0.5 },
+		});
+		expect(getByTestId('steering-dot').dataset.pct).toBe('25.0');
+	});
+
+	it('moves steering dot right when steer is positive', () => {
+		const { getByTestId } = render(InstrumentCluster, {
+			props: { speed: 0, gear: 'D', throttle: 0, brake: 0, steer: 0.5 },
+		});
+		expect(getByTestId('steering-dot').dataset.pct).toBe('75.0');
+	});
+
+	it('reflects throttle as bar fill', () => {
+		const { getByTestId } = render(InstrumentCluster, {
+			props: { speed: 0, gear: 'D', throttle: 0.7, brake: 0, steer: 0 },
 		});
 		expect(getByTestId('throttle-bar').dataset.fill).toBe('0.700');
+	});
+
+	it('reflects brake as bar fill', () => {
+		const { getByTestId } = render(InstrumentCluster, {
+			props: { speed: 0, gear: 'D', throttle: 0, brake: 0.4, steer: 0 },
+		});
 		expect(getByTestId('brake-bar').dataset.fill).toBe('0.400');
 	});
 });
