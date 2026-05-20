@@ -3,8 +3,8 @@ import { render } from '@testing-library/svelte';
 import InstrumentCluster from '$lib/components/dashboard/InstrumentCluster.svelte';
 
 describe('InstrumentCluster', () => {
-	it('mounts and renders gauge, steering path, and brake bar', () => {
-		const { getByTestId } = render(InstrumentCluster, {
+	it('mounts and renders the throttle gauge + steering path', () => {
+		const { getByTestId, queryByTestId } = render(InstrumentCluster, {
 			props: { speed: 50, gear: 'D', throttle: 0.3, brake: 0, steer: 0 },
 		});
 		expect(getByTestId('instrument-cluster')).toBeInTheDocument();
@@ -12,7 +12,8 @@ describe('InstrumentCluster', () => {
 		expect(getByTestId('gauge-speed')).toBeInTheDocument();
 		expect(getByTestId('gauge-gear')).toBeInTheDocument();
 		expect(getByTestId('steering-path')).toBeInTheDocument();
-		expect(getByTestId('brake-bar')).toBeInTheDocument();
+		// Brake bar was removed by user request.
+		expect(queryByTestId('brake-bar')).toBeNull();
 	});
 
 	it('shows the converted speed in the gauge centre (50 km/h ≈ 31 mph)', () => {
@@ -66,10 +67,4 @@ describe('InstrumentCluster', () => {
 		expect(getByTestId('throttle-gauge').dataset.fill).toBe('0.700');
 	});
 
-	it('reflects brake as bar fill', () => {
-		const { getByTestId } = render(InstrumentCluster, {
-			props: { speed: 0, gear: 'D', throttle: 0, brake: 0.4, steer: 0 },
-		});
-		expect(getByTestId('brake-bar').dataset.fill).toBe('0.400');
-	});
 });
