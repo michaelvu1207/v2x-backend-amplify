@@ -37,7 +37,7 @@
 </script>
 
 <div
-	class="relative flex h-full w-full font-tesla overflow-hidden items-center justify-center gap-5 sm:gap-8 px-5"
+	class="relative flex h-full w-full font-tesla overflow-hidden items-center justify-center gap-3 sm:gap-5 px-4"
 	style="
 		background:
 			radial-gradient(ellipse at 50% 0%, rgba(62, 130, 247, 0.06) 0%, transparent 55%);
@@ -48,8 +48,8 @@
 	<div
 		class="relative rounded-full overflow-hidden shrink-0"
 		style="
-			width: 7px;
-			height: 3.5rem;
+			width: 6px;
+			height: 3rem;
 			background: linear-gradient(180deg, rgba(58, 63, 71, 0.6) 0%, rgba(20, 23, 28, 0.8) 100%);
 			border: 1px solid rgba(255, 255, 255, 0.08);
 			box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.7);
@@ -77,13 +77,13 @@
 
 	<!-- CENTER: steering bar above speed + active gear letter -->
 	<div class="flex flex-col items-center gap-1.5 shrink-0">
-		<SteeringBar {steer} width="12rem" />
+		<SteeringBar {steer} width="10rem" />
 		<div class="flex items-baseline gap-3">
 			<SpeedDisplay {speed} unit={speedUnit} />
 			<span
 				class="font-tesla font-bold tabular-nums leading-none"
 				style="
-					font-size: 1.5rem;
+					font-size: 1.15rem;
 					color: {gearColor};
 					font-feature-settings: 'tnum';
 					text-shadow: 0 0 10px {gear === 'R' ? 'rgba(232,33,39,0.45)' : 'rgba(255,255,255,0.35)'};
@@ -100,8 +100,8 @@
 	<div
 		class="relative rounded-full overflow-hidden shrink-0"
 		style="
-			width: 7px;
-			height: 3.5rem;
+			width: 6px;
+			height: 3rem;
 			background: linear-gradient(180deg, rgba(58, 63, 71, 0.6) 0%, rgba(20, 23, 28, 0.8) 100%);
 			border: 1px solid rgba(255, 255, 255, 0.08);
 			box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.7);
