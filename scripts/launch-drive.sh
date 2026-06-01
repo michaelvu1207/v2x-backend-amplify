@@ -9,7 +9,7 @@ set -euo pipefail
 # scenes from V2X detection history.
 #
 # CARLA must already be running on port 2000 before invoking this
-# script — start the UE4 Editor manually first.
+# script.
 #
 # NOTE: Mutually exclusive with the observation bridge — do not
 # run both against the same CARLA instance.
@@ -82,6 +82,8 @@ fi
 echo "Starting Drive Server..."
 cd "$BRIDGE_DIR"
 export AWS_PROFILE
+export DTB_CARLA_HOST="${CARLA_HOST:-localhost}"
+export DTB_CARLA_PORT="$CARLA_PORT"
 export DTB_WS_PORT="$WS_PORT"
 python -m digital_twin_bridge.drive_main &
 DRIVE_PID=$!
