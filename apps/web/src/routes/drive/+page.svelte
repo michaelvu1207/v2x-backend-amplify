@@ -200,7 +200,7 @@
 	}
 
 	function handleMapSwitch(id: DriveMapId) {
-		if (id === selectedMap || $mapSwitching || state !== 'idle') return;
+		if (id === selectedMap || $mapSwitching || !canSwitchMap) return;
 		selectedScenario = '';
 		lastLoadedScenarioFile = '';
 		clearZones();
@@ -215,6 +215,7 @@
 	let isCalibrated = $derived($calibrated);
 	let wheelReady = $derived(inputMode === 'keyboard' || isCalibrated);
 	let error = $derived($lastError);
+	let canSwitchMap = $derived(state === 'idle' || state === 'connecting');
 
 	$effect(() => {
 		if ($sessionState === 'driving') {
@@ -577,7 +578,7 @@
 							{#each maps as map}
 								<button
 									onclick={() => handleMapSwitch(map.id)}
-									disabled={$mapSwitching || state !== 'idle'}
+									disabled={$mapSwitching || !canSwitchMap}
 									aria-pressed={selectedMap === map.id}
 									class="flex-1 px-3 py-2 rounded-lg text-xs font-body tracking-wider transition-all duration-200 cursor-pointer disabled:cursor-wait disabled:opacity-60
 									{selectedMap === map.id
