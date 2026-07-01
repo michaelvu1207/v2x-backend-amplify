@@ -25,6 +25,9 @@ STATE_PATH="${STATE_PATH:-/state}"
 MAP_DATA_PATH="${MAP_DATA_PATH:-/map-data}"
 DRIVE_CONFIG_PATH="${DRIVE_CONFIG_PATH:-/drive-config}"
 VIDEO_CAMERA_IDS="${VIDEO_CAMERA_IDS:-[\"ch1\",\"ch2\",\"ch3\",\"ch4\"]}"
+PERCEPTION_STREAM_URLS="${PERCEPTION_STREAM_URLS:-{}}"
+PERCEPTION_STREAM_BASE_URL="${PERCEPTION_STREAM_BASE_URL:-}"
+PERCEPTION_STREAM_PATH_TEMPLATE="${PERCEPTION_STREAM_PATH_TEMPLATE:-/streams/{camera_id}.mjpg}"
 DEMO_VIDEOS_PATH="${DEMO_VIDEOS_PATH:-/demo-videos}"
 CLOUDFLARE_DRIVE_WS_URL="${CLOUDFLARE_DRIVE_WS_URL:-${VITE_CLOUDFLARE_DRIVE_WS_URL:-${VITE_DRIVE_WS_URL:-}}}"
 TAILSCALE_DRIVE_WS_URL="${TAILSCALE_DRIVE_WS_URL:-${VITE_TAILSCALE_DRIVE_WS_URL:-wss://path-b860i-aorus-pro-ice.tail1cad6a.ts.net}}"
@@ -69,6 +72,9 @@ cat > "${BUILD_DIR}/config.json" <<JSON
   "driveConfigPath": "${DRIVE_CONFIG_PATH}",
   "demoVideosPath": "${DEMO_VIDEOS_PATH}",
   "videoCameraIds": ${VIDEO_CAMERA_IDS},
+  "perceptionStreamUrls": ${PERCEPTION_STREAM_URLS},
+  "perceptionStreamBaseUrl": "${PERCEPTION_STREAM_BASE_URL}",
+  "perceptionStreamPathTemplate": "${PERCEPTION_STREAM_PATH_TEMPLATE}",
   "cloudflareDriveWsUrl": "${CLOUDFLARE_DRIVE_WS_URL}",
   "tailscaleDriveWsUrl": "${TAILSCALE_DRIVE_WS_URL}"
 }
