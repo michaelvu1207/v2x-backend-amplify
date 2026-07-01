@@ -93,6 +93,64 @@ if ! aws amplify get-branch --app-id "${APP_ID}" --branch-name "${BRANCH_NAME}" 
   aws amplify create-branch --app-id "${APP_ID}" --branch-name "${BRANCH_NAME}" --stage PRODUCTION >/dev/null
 fi
 
+ENV_JSON="${WORKDIR}/environment.json"
+cat > "${ENV_JSON}" <<JSON
+{
+  "API_BASE_URL": "${API_BASE_URL}",
+  "DETECTIONS_API_BASE_URL": "${DETECTIONS_API_BASE_URL}",
+  "STATE_BASE_URL": "${STATE_BASE_URL}",
+  "STATE_PATH": "${STATE_PATH}",
+  "MAP_DATA_PATH": "${MAP_DATA_PATH}",
+  "DRIVE_CONFIG_PATH": "${DRIVE_CONFIG_PATH}",
+  "DEMO_VIDEOS_PATH": "${DEMO_VIDEOS_PATH}",
+  "VIDEO_CAMERA_IDS": ${VIDEO_CAMERA_IDS},
+  "PERCEPTION_STREAM_URLS": ${PERCEPTION_STREAM_URLS},
+  "PERCEPTION_STREAM_BASE_URL": "${PERCEPTION_STREAM_BASE_URL}",
+  "PERCEPTION_STREAM_PATH_TEMPLATE": "${PERCEPTION_STREAM_PATH_TEMPLATE}",
+  "VITE_CLOUDFLARE_DRIVE_WS_URL": "${CLOUDFLARE_DRIVE_WS_URL}",
+  "VITE_TAILSCALE_DRIVE_WS_URL": "${TAILSCALE_DRIVE_WS_URL}"
+}
+JSON
+
+APP_REPOSITORY="$(aws amplify get-app --app-id "${APP_ID}" --query 'app.repository' --output text 2>/dev/null || true)"
+if [[ -n "${APP_REPOSITORY}" && "${APP_REPOSITORY}" != "None" ]]; then
+  echo "Connected repository detected; updating branch environment and app build spec."
+  aws amplify update-branch \
+    --app-id "${APP_ID}" \
+    --branch-name "${BRANCH_NAME}" \
+    --environment-variables "file://${ENV_JSON}" >/dev/null
+
+  BUILD_SPEC_FILE="${ROOT}/infra/amplify/buildspec.yml"
+  if [[ -f "${BUILD_SPEC_FILE}" ]]; then
+    aws amplify update-app \
+      --app-id "${APP_ID}" \
+      --build-spec "file://${BUILD_SPEC_FILE}" >/dev/null
+  fi
+
+  echo "Starting connected-repo release..."
+  JOB_ID="$(aws amplify start-job --app-id "${APP_ID}" --branch-name "${BRANCH_NAME}" --job-type RELEASE --query 'jobSummary.jobId' --output text)"
+
+  echo "Waiting for deployment to finish..."
+  for _ in $(seq 1 90); do
+    STATUS="$(aws amplify get-job --app-id "${APP_ID}" --branch-name "${BRANCH_NAME}" --job-id "${JOB_ID}" --query 'job.summary.status' --output text 2>/dev/null || true)"
+    if [[ "${STATUS}" == "SUCCEED" ]]; then
+      break
+    fi
+    if [[ "${STATUS}" == "FAILED" || "${STATUS}" == "CANCELLED" ]]; then
+      aws amplify get-job --app-id "${APP_ID}" --branch-name "${BRANCH_NAME}" --job-id "${JOB_ID}" --output json | jq . >&2 || true
+      exit 1
+    fi
+    sleep 10
+  done
+
+  DEFAULT_DOMAIN="$(aws amplify get-app --app-id "${APP_ID}" --query 'app.defaultDomain' --output text)"
+  echo "Done."
+  echo "AppId: ${APP_ID}"
+  echo "JobId: ${JOB_ID}"
+  echo "URL: https://${BRANCH_NAME}.${DEFAULT_DOMAIN}/"
+  exit 0
+fi
+
 echo "Stopping any in-progress jobs..."
 aws amplify list-jobs --app-id "${APP_ID}" --branch-name "${BRANCH_NAME}" --max-results 10 --output json 2>/dev/null \
   | jq -r '.jobSummaries[]? | select(.status=="PENDING" or .status=="RUNNING") | .jobId' \
