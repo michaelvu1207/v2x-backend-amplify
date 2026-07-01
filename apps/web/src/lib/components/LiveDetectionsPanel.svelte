@@ -91,8 +91,8 @@
 	});
 </script>
 
-<aside class="border-t border-gray-800 bg-gray-950 xl:border-t-0 xl:border-l">
-	<div class="sticky top-0 flex flex-col gap-4 px-4 py-4 xl:w-80">
+<aside class="border-t border-gray-800 bg-gray-950 lg:border-t-0 lg:border-l">
+	<div class="sticky top-0 flex flex-col gap-4 px-4 py-4 lg:w-80">
 		<div class="flex items-start justify-between gap-3">
 			<div>
 				<h2 class="text-sm font-semibold text-white">Live detections</h2>

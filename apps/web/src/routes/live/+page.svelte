@@ -21,7 +21,7 @@
 	<Header />
 
 	<div class="min-h-0 flex-1 overflow-y-auto bg-black">
-		<div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_20rem]">
+		<div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_20rem]">
 			<LiveCameraPanel config={runtimeConfig} />
 			<LiveDetectionsPanel config={runtimeConfig} />
 		</div>
