@@ -114,15 +114,30 @@ def gps_to_carla(
     origin_geo = carla_map.transform_to_geolocation(carla.Location())
     origin_lat = origin_geo.latitude
 
-    # Mirror latitude for UE4 left-handed Y-axis
-    corrected_lat = 2 * origin_lat - lat
+    if hasattr(carla_map, "geolocation_to_transform"):
+        # CARLA <= 0.9.x: geolocation_to_transform exists but mishandles the
+        # UE left-handed Y-axis, so mirror latitude around the origin first.
+        corrected_lat = 2 * origin_lat - lat
 
-    geo = carla.GeoLocation(
-        latitude=corrected_lat,
-        longitude=lon,
-        altitude=0.0,
-    )
-    location = carla_map.geolocation_to_transform(geo)
+        geo = carla.GeoLocation(
+            latitude=corrected_lat,
+            longitude=lon,
+            altitude=0.0,
+        )
+        location = carla_map.geolocation_to_transform(geo)
+    else:
+        # CARLA 0.10 dropped geolocation_to_transform, and its
+        # transform_to_geolocation returns correct WGS-84 (x = easting,
+        # y = -northing; verified empirically on the RFS map). Invert with a
+        # flat-earth approximation around the map origin — accurate to
+        # centimetres at site scale.
+        meters_per_deg_lat = 111_320.0
+        meters_per_deg_lon = 111_320.0 * math.cos(math.radians(origin_lat))
+        location = carla.Location(
+            x=(lon - origin_geo.longitude) * meters_per_deg_lon,
+            y=-((lat - origin_lat) * meters_per_deg_lat),
+            z=0.0,
+        )
 
     # Snap Z to the road surface (coarse estimate from OpenDRIVE profile)
     wp = carla_map.get_waypoint(location, project_to_road=True)
@@ -147,10 +162,14 @@ def carla_to_gps(
     Returns:
         A ``(latitude, longitude)`` tuple in decimal degrees.
     """
+    geo = carla_map.transform_to_geolocation(location)
+
+    if not hasattr(carla_map, "geolocation_to_transform"):
+        # CARLA 0.10: transform_to_geolocation is already correct WGS-84.
+        return geo.latitude, geo.longitude
+
     origin_geo = carla_map.transform_to_geolocation(carla.Location())
     origin_lat = origin_geo.latitude
-
-    geo = carla_map.transform_to_geolocation(location)
 
     # Reverse the Y-axis mirror
     corrected_lat = 2 * origin_lat - geo.latitude
