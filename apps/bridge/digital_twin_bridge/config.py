@@ -70,6 +70,21 @@ class Config:
     # on the ego's browser. Only fires when the EVA is closing on the ego.
     EVA_WARNING_DISTANCE_M: float = 20.0
 
+    # Digital twin: mirrored street cameras + live detection sync.
+    # Both only activate on the georeferenced RFS map. "off" disables.
+    TWIN_RIG: str = "on"
+    TWIN_SYNC: str = "on"
+    # Shared camera-pose config (also read by apps/perception).
+    CAMERAS_JSON: str = ""
+    # Perception runs on the same host, so poll it directly instead of
+    # going camera -> cloud -> poll.
+    TWIN_DETECTIONS_URL: str = "http://127.0.0.1:8090/detections/latest"
+    TWIN_POLL_INTERVAL: float = 1.0
+    TWIN_DESPAWN_SECONDS: float = 12.0
+    TWIN_CAM_WIDTH: int = 1280
+    TWIN_CAM_HEIGHT: int = 960
+    TWIN_CAM_FPS: float = 12.0
+
     # Logging
     LOG_LEVEL: str = "INFO"
 

@@ -27,6 +27,11 @@ class MockLocation:
     y: float = 0.0
     z: float = 0.0
 
+    def distance(self, other: "MockLocation") -> float:
+        return (
+            (self.x - other.x) ** 2 + (self.y - other.y) ** 2 + (self.z - other.z) ** 2
+        ) ** 0.5
+
 
 @dataclass
 class MockRotation:
@@ -109,6 +114,18 @@ class MockActor:
         self.autopilot_enabled = False
         self.traffic_manager_port: Optional[int] = None
         self.control_history: list[MockVehicleControl] = []
+        self.attributes: dict[str, str] = {}
+        self.physics_enabled = True
+        self._listener = None
+
+    def listen(self, callback) -> None:
+        self._listener = callback
+
+    def stop(self) -> None:
+        self._listener = None
+
+    def set_simulate_physics(self, enabled: bool) -> None:
+        self.physics_enabled = enabled
 
     def get_transform(self) -> MockTransform:
         return self._transform
@@ -396,6 +413,8 @@ def _install_fake_carla_module() -> None:
     fake_carla.Location = MockLocation
     fake_carla.Rotation = MockRotation
     fake_carla.Transform = MockTransform
+    fake_carla.GeoLocation = MockGeoLocation
+    fake_carla.LaneType = types.SimpleNamespace(Driving=1, Sidewalk=2)
     fake_carla.VehicleControl = MockVehicleControl
     fake_carla.Vector3D = MockLocation
     fake_carla.Color = MockColor

@@ -70,6 +70,7 @@
 	import TrajectoryPanel from '$lib/components/TrajectoryPanel.svelte';
 	import CameraSettingsPanel from '$lib/components/CameraSettingsPanel.svelte';
 	import ScenarioPicker from '$lib/components/ScenarioPicker.svelte';
+	import TwinPanel from '$lib/components/TwinPanel.svelte';
 	import { checkZoneProximity, resetZoneProximity, clearZones } from '$lib/stores/v2xZones';
 	import { v2xZones } from '$lib/stores/v2xZones';
 	import { checkActorGeofenceProximity, resetActorGeofenceProximity } from '$lib/stores/actorGeofences';
@@ -87,6 +88,9 @@
 	let cameraViewRef = $state<CameraViewComponent | null>(null);
 	let driveTunnels = $state<DriveTunnel[]>(DRIVE_TUNNELS);
 	let selectedTunnel = $state<TunnelId>(DRIVE_TUNNELS[0].id);
+	// 'drive' = ego driving UI; 'twin' = digital twin mirror of the real
+	// street cameras (side-by-side CARLA render / real feed).
+	let viewMode = $state<'drive' | 'twin'>('drive');
 	let selectedVehicle = $state('vehicle.tesla.model3');
 	let showObjectPlacer = $state(false);
 	let showV2xPlacer = $state(false);
@@ -253,6 +257,9 @@
 	});
 
 	onMount(async () => {
+		if (new URLSearchParams(window.location.search).get('view') === 'twin') {
+			viewMode = 'twin';
+		}
 		startPolling();
 		startKeyboardInput();
 		try {
@@ -484,6 +491,32 @@
 {/if}
 
 <div class="h-screen w-screen bg-black relative overflow-hidden">
+	<!-- Drive | Twin view toggle -->
+	<div class="absolute top-3 left-1/2 z-[70] flex -translate-x-1/2 items-center overflow-hidden rounded-full border border-gray-700/70 bg-gray-900/90 backdrop-blur">
+		<button
+			class={`px-4 py-1.5 text-[11px] font-semibold tracking-[0.16em] uppercase transition ${
+				viewMode === 'drive' ? 'bg-cyan-400/15 text-cyan-200' : 'text-gray-400 hover:text-white'
+			}`}
+			onclick={() => (viewMode = 'drive')}
+		>
+			Drive
+		</button>
+		<button
+			class={`px-4 py-1.5 text-[11px] font-semibold tracking-[0.16em] uppercase transition ${
+				viewMode === 'twin' ? 'bg-cyan-400/15 text-cyan-200' : 'text-gray-400 hover:text-white'
+			}`}
+			onclick={() => (viewMode = 'twin')}
+		>
+			Twin
+		</button>
+	</div>
+
+	{#if viewMode === 'twin'}
+		<div class="absolute inset-0 z-[60] pt-0">
+			<TwinPanel wsBaseUrl={getSelectedUrl()} />
+		</div>
+	{/if}
+
 	{#if state === 'idle' || state === 'connecting'}
 		<div class="absolute inset-0 flex items-center justify-center bg-gray-950">
 			<!-- Subtle radial glow behind card -->

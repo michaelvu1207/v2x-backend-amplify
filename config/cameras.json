@@ -1,0 +1,53 @@
+{
+  "site": {
+    "name": "Richmond Field Station",
+    "lat": 37.91560117034595,
+    "lon": -122.33478756387032,
+    "geohash": "9q9p8",
+    "city": "Richmond",
+    "state": "CA",
+    "country": "USA"
+  },
+  "cameras": [
+    {
+      "id": "ch1",
+      "device_id": "cam-001-ch1",
+      "stream": "v2x-backend-cam-ch1",
+      "height_m": 7.0,
+      "pitch_deg": -39.2,
+      "yaw_deg": -46.06,
+      "heading_deg": 200.0,
+      "intrinsics": { "fx": 1325.4, "fy": 1325.4, "cx": 1280.0, "cy": 960.0, "width": 2560, "height": 1920 }
+    },
+    {
+      "id": "ch2",
+      "device_id": "cam-001-ch2",
+      "stream": "v2x-backend-cam-ch2",
+      "height_m": 7.0,
+      "pitch_deg": -40.52,
+      "yaw_deg": 71.25,
+      "heading_deg": 300.0,
+      "intrinsics": { "fx": 1325.4, "fy": 1325.4, "cx": 1280.0, "cy": 960.0, "width": 2560, "height": 1920 }
+    },
+    {
+      "id": "ch3",
+      "device_id": "cam-001-ch3",
+      "stream": "v2x-backend-cam-ch3",
+      "height_m": 7.0,
+      "pitch_deg": -30.42,
+      "yaw_deg": 14.58,
+      "heading_deg": 315.0,
+      "intrinsics": { "fx": 1325.4, "fy": 1325.4, "cx": 1280.0, "cy": 960.0, "width": 2560, "height": 1920 }
+    },
+    {
+      "id": "ch4",
+      "device_id": "cam-001-ch4",
+      "stream": "v2x-backend-cam-ch4",
+      "height_m": 7.0,
+      "pitch_deg": -43.48,
+      "yaw_deg": -22.63,
+      "heading_deg": 260.0,
+      "intrinsics": { "fx": 1325.4, "fy": 1325.4, "cx": 1280.0, "cy": 960.0, "width": 2560, "height": 1920 }
+    }
+  ]
+}

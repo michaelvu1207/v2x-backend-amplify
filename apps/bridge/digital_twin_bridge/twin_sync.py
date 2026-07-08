@@ -1,0 +1,344 @@
+"""
+Twin Sync — mirrors live real-world detections into CARLA actors.
+
+Polls the perception service's local /detections/latest endpoint (both
+services run on the Path PC, so no cloud round-trip) and keeps one CARLA
+actor per global track: cars/trucks become vehicles snapped to the
+nearest driving lane, people become walkers. Positions are lerped on the
+bridge tick so actors glide between 1 Hz GPS fixes instead of teleporting.
+
+All actors are spawned with physics off and role_name="twin_object" so
+drive sessions, scenario runs, and the actor audit can tell them apart.
+Disable entirely with DTB_TWIN_SYNC=off.
+"""
+
+import asyncio
+import logging
+import math
+import time
+from typing import Dict, List, Optional
+
+import requests
+
+from digital_twin_bridge.geo_utils import gps_to_carla
+
+logger = logging.getLogger(__name__)
+
+VEHICLE_TYPES = {"car", "truck", "bus"}
+# Never mirror detections into blueprints with gameplay side effects
+# (the firetruck triggers EVA pull-over alerts on drive sessions).
+BLUEPRINT_BLOCKLIST = ("firetruck", "ambulance", "police")
+
+
+class TwinTrack:
+    """One mirrored real-world object and its CARLA actor."""
+
+    __slots__ = (
+        "object_id", "object_type", "actor_id", "last_seen",
+        "current", "target", "lerp_start", "lerp_duration", "yaw",
+    )
+
+    def __init__(self, object_id: str, object_type: str) -> None:
+        self.object_id = object_id
+        self.object_type = object_type
+        self.actor_id: Optional[int] = None
+        self.last_seen = 0.0
+        self.current = None  # carla.Location
+        self.target = None  # carla.Location
+        self.lerp_start = 0.0
+        self.lerp_duration = 1.0
+        self.yaw = 0.0
+
+
+class TwinSync:
+    """Poll detections and upsert twin actors.
+
+    Polling runs as an asyncio task on the server loop (HTTP in an
+    executor); all CARLA actor operations happen on the loop thread,
+    same as the drive-session handlers.
+    """
+
+    def __init__(
+        self,
+        world,
+        carla_map,
+        detections_url: str = "http://127.0.0.1:8090/detections/latest",
+        poll_interval: float = 1.0,
+        despawn_after: float = 12.0,
+        detection_max_age: float = 8.0,
+    ) -> None:
+        self._world = world
+        self._map = carla_map
+        self._detections_url = detections_url
+        self._poll_interval = poll_interval
+        self._despawn_after = despawn_after
+        self._detection_max_age = detection_max_age
+        self._tracks: Dict[str, TwinTrack] = {}
+        self._vehicle_blueprints: List[object] = []
+        self._truck_blueprints: List[object] = []
+        self._walker_blueprints: List[object] = []
+        self._blueprints_loaded = False
+        self._stopped = False
+        self._poll_failures = 0
+
+    # ------------------------------------------------------------------
+    # Blueprint selection
+    # ------------------------------------------------------------------
+
+    def _load_blueprints(self) -> None:
+        if self._blueprints_loaded:
+            return
+        bp_lib = self._world.get_blueprint_library()
+
+        def usable(bp) -> bool:
+            return not any(token in bp.id for token in BLUEPRINT_BLOCKLIST)
+
+        vehicles = sorted((bp for bp in bp_lib.filter("vehicle.*") if usable(bp)), key=lambda b: b.id)
+        for bp in vehicles:
+            wheels = 4
+            try:
+                if bp.has_attribute("number_of_wheels"):
+                    wheels = int(bp.get_attribute("number_of_wheels").as_int())
+            except (AttributeError, ValueError, RuntimeError):
+                pass
+            if wheels < 4:
+                continue
+            if any(token in bp.id for token in ("truck", "van", "sprinter", "cybertruck")):
+                self._truck_blueprints.append(bp)
+            else:
+                self._vehicle_blueprints.append(bp)
+        if not self._truck_blueprints:
+            self._truck_blueprints = list(self._vehicle_blueprints)
+
+        self._walker_blueprints = sorted(bp_lib.filter("walker.pedestrian.*"), key=lambda b: b.id)
+        self._blueprints_loaded = True
+        logger.info(
+            "Twin sync blueprints: %d vehicles, %d trucks, %d walkers",
+            len(self._vehicle_blueprints), len(self._truck_blueprints), len(self._walker_blueprints),
+        )
+
+    def _blueprint_for(self, track: TwinTrack):
+        if track.object_type == "person":
+            pool = self._walker_blueprints
+        elif track.object_type in {"truck", "bus"}:
+            pool = self._truck_blueprints
+        else:
+            pool = self._vehicle_blueprints
+        if not pool:
+            return None
+        # Stable per-track pick so a track keeps its car across updates.
+        bp = pool[hash(track.object_id) % len(pool)]
+        try:
+            bp.set_attribute("role_name", "twin_object")
+        except (IndexError, RuntimeError):
+            pass
+        return bp
+
+    # ------------------------------------------------------------------
+    # Placement
+    # ------------------------------------------------------------------
+
+    def _location_for(self, track: TwinTrack, lat: float, lon: float):
+        """GPS -> CARLA location, snapped to a plausible surface."""
+        import carla
+
+        location = gps_to_carla(self._map, lat, lon)
+        if track.object_type in VEHICLE_TYPES:
+            waypoint = self._map.get_waypoint(location, project_to_road=True)
+            if waypoint is not None:
+                snapped = waypoint.transform.location
+                # Keep the real-world position along the lane, only adopt the
+                # lane height/yaw when the detection is near the road.
+                if snapped.distance(location) < 4.0:
+                    track.yaw = waypoint.transform.rotation.yaw
+                    location = carla.Location(x=snapped.x, y=snapped.y, z=snapped.z)
+                else:
+                    location.z = snapped.z
+        else:
+            try:
+                sidewalk = self._map.get_waypoint(
+                    location, project_to_road=True, lane_type=carla.LaneType.Sidewalk
+                )
+            except Exception:
+                sidewalk = None
+            if sidewalk is not None and sidewalk.transform.location.distance(location) < 5.0:
+                location.z = sidewalk.transform.location.z
+        # Slight lift avoids ground clipping on spawn.
+        location.z += 0.2
+        return location
+
+    # ------------------------------------------------------------------
+    # Poll + apply
+    # ------------------------------------------------------------------
+
+    def _fetch_detections(self) -> Optional[list]:
+        """Fetch and flatten per-camera detection summaries (blocking)."""
+        resp = requests.get(self._detections_url, timeout=5)
+        resp.raise_for_status()
+        payload = resp.json()
+        detections = []
+        now = time.time()
+        for camera in (payload.get("cameras") or {}).values():
+            updated_at = camera.get("updated_at")
+            if updated_at:
+                # Skip cameras whose summary has gone stale (feed stalled).
+                try:
+                    from datetime import datetime, timezone
+
+                    updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                    if now - updated.timestamp() > self._detection_max_age:
+                        continue
+                except ValueError:
+                    pass
+            detections.extend(camera.get("detections") or [])
+        return detections
+
+    def _apply(self, detections: list) -> None:
+        import carla
+
+        self._load_blueprints()
+        now = time.time()
+
+        for det in detections:
+            object_id = det.get("object_id")
+            object_type = det.get("object_type") or "car"
+            gps = det.get("gps_location") or {}
+            lat, lon = gps.get("latitude"), gps.get("longitude")
+            if not object_id or lat is None or lon is None:
+                continue
+            if object_type not in VEHICLE_TYPES and object_type != "person":
+                continue
+
+            track = self._tracks.get(object_id)
+            if track is None:
+                track = TwinTrack(object_id, object_type)
+                self._tracks[object_id] = track
+            track.last_seen = now
+
+            location = self._location_for(track, float(lat), float(lon))
+
+            if track.actor_id is None:
+                bp = self._blueprint_for(track)
+                if bp is None:
+                    continue
+                transform = carla.Transform(location, carla.Rotation(yaw=track.yaw))
+                actor = self._world.try_spawn_actor(bp, transform)
+                if actor is None:
+                    # Spawn collision (another actor there); retry next poll.
+                    continue
+                try:
+                    actor.set_simulate_physics(False)
+                except Exception:
+                    pass
+                track.actor_id = actor.id
+                track.current = location
+                track.target = location
+                logger.info(
+                    "Twin spawn: %s (%s) as %s at (%.1f, %.1f)",
+                    object_id, object_type, bp.id, location.x, location.y,
+                )
+            else:
+                # New GPS fix: update motion yaw, retarget the lerp.
+                if track.current is not None:
+                    dx = location.x - track.current.x
+                    dy = location.y - track.current.y
+                    if math.hypot(dx, dy) > 1.5:
+                        track.yaw = math.degrees(math.atan2(dy, dx))
+                track.target = location
+                track.lerp_start = now
+                track.lerp_duration = self._poll_interval
+
+        self._despawn_stale(now)
+
+    def _despawn_stale(self, now: float) -> None:
+        for object_id in list(self._tracks):
+            track = self._tracks[object_id]
+            if now - track.last_seen <= self._despawn_after:
+                continue
+            self._destroy_track(track)
+            del self._tracks[object_id]
+            logger.info("Twin despawn: %s (unseen for %.0fs)", object_id, now - track.last_seen)
+
+    def _destroy_track(self, track: TwinTrack) -> None:
+        if track.actor_id is None:
+            return
+        try:
+            actor = self._world.get_actor(track.actor_id)
+            if actor is not None:
+                actor.destroy()
+        except Exception:
+            logger.debug("Twin actor %s already gone", track.actor_id)
+        track.actor_id = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """Poll loop; HTTP happens in an executor, actor ops on the loop."""
+        loop = asyncio.get_running_loop()
+        logger.info("Twin sync polling %s every %.1fs", self._detections_url, self._poll_interval)
+        while not self._stopped:
+            try:
+                detections = await loop.run_in_executor(None, self._fetch_detections)
+                self._poll_failures = 0
+                if detections is not None:
+                    self._apply(detections)
+            except requests.RequestException as exc:
+                self._poll_failures += 1
+                if self._poll_failures in (1, 10) or self._poll_failures % 60 == 0:
+                    logger.warning(
+                        "Twin sync poll failed (%d in a row): %s", self._poll_failures, exc
+                    )
+                self._despawn_stale(time.time())
+            except Exception:
+                logger.error("Twin sync apply error", exc_info=True)
+            await asyncio.sleep(self._poll_interval)
+
+    def tick(self) -> None:
+        """Advance position lerps; called from the bridge tick loop."""
+        import carla
+
+        now = time.time()
+        for track in self._tracks.values():
+            if track.actor_id is None or track.target is None:
+                continue
+            if track.current is None:
+                track.current = track.target
+            t = 1.0
+            if track.lerp_duration > 0:
+                t = min((now - track.lerp_start) / track.lerp_duration, 1.0)
+            x = track.current.x + (track.target.x - track.current.x) * t
+            y = track.current.y + (track.target.y - track.current.y) * t
+            z = track.current.z + (track.target.z - track.current.z) * t
+            if t >= 1.0:
+                track.current = track.target
+            try:
+                actor = self._world.get_actor(track.actor_id)
+                if actor is None:
+                    track.actor_id = None
+                    continue
+                actor.set_transform(
+                    carla.Transform(carla.Location(x=x, y=y, z=z), carla.Rotation(yaw=track.yaw))
+                )
+            except Exception:
+                logger.debug("Twin tick transform failed for %s", track.object_id)
+
+    def actor_ids(self) -> set:
+        return {t.actor_id for t in self._tracks.values() if t.actor_id is not None}
+
+    def status(self) -> dict:
+        return {
+            "tracks": len(self._tracks),
+            "actors": len(self.actor_ids()),
+            "poll_failures": self._poll_failures,
+            "detections_url": self._detections_url,
+        }
+
+    def stop(self) -> None:
+        """Stop polling and destroy all twin actors."""
+        self._stopped = True
+        for track in self._tracks.values():
+            self._destroy_track(track)
+        self._tracks.clear()
+        logger.info("Twin sync stopped")

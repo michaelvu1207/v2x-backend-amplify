@@ -34,6 +34,12 @@ from digital_twin_bridge.carla_connection import CarlaConnection, drive_map_stat
 from digital_twin_bridge.drive_server import serve_drive, _active_sessions, active_session_count
 from digital_twin_bridge.trajectory_player import TrajectoryPlayer
 from digital_twin_bridge.openscenario_runner import OpenScenarioRunner
+from digital_twin_bridge.twin_camera_rig import (
+    TwinCameraRig,
+    is_twin_supported_map,
+    load_cameras_config,
+)
+from digital_twin_bridge.twin_sync import TwinSync
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +132,12 @@ def cleanup_drive_world(world, shared_prop_pool: dict[str, int] | None = None, r
     for actor in world.get_actors().filter("vehicle.*"):
         logger.info("Cleaning up leftover vehicle: %s (id=%d)", actor.type_id, actor.id)
         actor.destroy()
+    for actor in world.get_actors().filter("walker.*"):
+        logger.info("Cleaning up leftover walker: %s (id=%d)", actor.type_id, actor.id)
+        try:
+            actor.destroy()
+        except Exception as e:
+            logger.debug("Walker destroy failed (id=%d): %s", actor.id, e)
     for actor in world.get_actors().filter("sensor.*"):
         logger.info("Cleaning up leftover sensor: %s (id=%d)", actor.type_id, actor.id)
         actor.destroy()
@@ -226,6 +238,13 @@ class DriveMapController:
             except Exception as e:
                 logger.debug("OpenSCENARIO stop before map switch failed: %s", e)
 
+            stop_twin = self._runtime.get("stop_twin")
+            if stop_twin is not None:
+                try:
+                    stop_twin()
+                except Exception:
+                    logger.warning("Twin stop before map switch failed", exc_info=True)
+
             cleanup_drive_world(self._conn.world, self._shared_prop_pool)
             self._runtime["world"] = self._conn.world
             self._runtime["carla_map"] = self._conn.carla_map
@@ -237,6 +256,13 @@ class DriveMapController:
                 self._config,
                 self._conn.world,
             )
+
+            start_twin = self._runtime.get("start_twin")
+            if start_twin is not None:
+                try:
+                    start_twin()
+                except Exception:
+                    logger.warning("Twin start after map switch failed", exc_info=True)
 
             try:
                 await loop.run_in_executor(None, export_current_map_data, self._conn, self._config, self._uplink)
@@ -302,6 +328,58 @@ async def main():
         "openscenario_runner": openscenario_runner,
     }
     map_controller = DriveMapController(conn, config, runtime, shared_prop_pool, uplink)
+
+    # ── Digital twin: mirrored street cameras + live detection sync ──
+    # Server-owned like the trajectory player; only active on the
+    # georeferenced RFS map. DTB_TWIN_RIG / DTB_TWIN_SYNC = "off" disable.
+    cameras_config = load_cameras_config(config.CAMERAS_JSON or None)
+    runtime["twin_rig"] = None
+    runtime["twin_sync"] = None
+    twin_sync_task: dict = {"task": None}
+
+    def start_twin() -> None:
+        map_name = runtime["carla_map"].name
+        if cameras_config is None or not is_twin_supported_map(map_name):
+            logger.info("Twin disabled for map %s", map_name)
+            return
+        if config.TWIN_RIG.lower() != "off":
+            rig = TwinCameraRig(
+                runtime["world"],
+                runtime["carla_map"],
+                cameras_config,
+                image_width=config.TWIN_CAM_WIDTH,
+                image_height=config.TWIN_CAM_HEIGHT,
+                fps=config.TWIN_CAM_FPS,
+            )
+            if rig.spawn() > 0:
+                runtime["twin_rig"] = rig
+        if config.TWIN_SYNC.lower() != "off":
+            sync = TwinSync(
+                runtime["world"],
+                runtime["carla_map"],
+                detections_url=config.TWIN_DETECTIONS_URL,
+                poll_interval=config.TWIN_POLL_INTERVAL,
+                despawn_after=config.TWIN_DESPAWN_SECONDS,
+            )
+            runtime["twin_sync"] = sync
+            twin_sync_task["task"] = asyncio.get_running_loop().create_task(sync.run())
+
+    def stop_twin() -> None:
+        task = twin_sync_task.get("task")
+        if task is not None:
+            task.cancel()
+            twin_sync_task["task"] = None
+        sync = runtime.get("twin_sync")
+        if sync is not None:
+            sync.stop()
+            runtime["twin_sync"] = None
+        rig = runtime.get("twin_rig")
+        if rig is not None:
+            rig.destroy()
+            runtime["twin_rig"] = None
+
+    runtime["start_twin"] = start_twin
+    runtime["stop_twin"] = stop_twin
 
     # ── Drive server setup ──
     api_fetcher = make_api_fetcher(config)
@@ -448,9 +526,59 @@ async def main():
                 pass
             pump_task.cancel()
 
+    async def _serve_twin(websocket):
+        """Stream one twin camera's JPEG frames as binary messages."""
+        import json
+        from urllib.parse import parse_qs, urlparse
+
+        query = parse_qs(urlparse(websocket.request.path).query)
+        camera_id = (query.get("cam") or ["ch1"])[0]
+        rig = runtime.get("twin_rig")
+        sync = runtime.get("twin_sync")
+        if rig is None or not rig.has_camera(camera_id):
+            await websocket.send(json.dumps({
+                "type": "twin_error",
+                "message": f"Twin camera '{camera_id}' unavailable",
+                "cameras": rig.camera_ids if rig is not None else [],
+            }))
+            await websocket.close()
+            return
+
+        status = rig.status()
+        await websocket.send(json.dumps({
+            "type": "twin_hello",
+            "camera_id": camera_id,
+            "width": status["width"],
+            "height": status["height"],
+            "fps": status["fps"],
+            "cameras": status["cameras"],
+            "sync": sync.status() if sync is not None else None,
+        }))
+        logger.info("Twin stream opened for %s (%s)", camera_id, websocket.remote_address)
+
+        interval = 1.0 / max(status["fps"], 1.0)
+        last_frame = None
+        try:
+            while True:
+                rig = runtime.get("twin_rig")
+                if rig is None:
+                    break
+                frame = rig.get_latest_frame(camera_id)
+                if frame is not None and frame is not last_frame:
+                    await websocket.send(frame)
+                    last_frame = frame
+                await asyncio.sleep(interval)
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        finally:
+            logger.info("Twin stream closed for %s", camera_id)
+
     async def handler(websocket):
         if websocket.request.path == "/test":
             await _serve_test(websocket)
+            return
+        if websocket.request.path.startswith("/twin"):
+            await _serve_twin(websocket)
             return
         await serve_drive(
             websocket, runtime["world"], runtime["carla_map"], api_fetcher,
@@ -504,6 +632,12 @@ async def main():
                 trajectory_player.tick()
             except Exception as e:
                 logger.warning("trajectory_player.tick() failed: %s", e)
+            twin_sync = runtime.get("twin_sync")
+            if twin_sync is not None:
+                try:
+                    twin_sync.tick()
+                except Exception as e:
+                    logger.debug("twin_sync.tick() failed: %s", e)
             elapsed = loop.time() - start
             await asyncio.sleep(max(0.0, target_dt - elapsed))
 
@@ -516,10 +650,17 @@ async def main():
             try:
                 from digital_twin_bridge.drive_server import _traffic_actor_ids
                 world = runtime["world"]
+                twin_sync = runtime.get("twin_sync")
+                twin_rig = runtime.get("twin_rig")
+                twin_ids = twin_sync.actor_ids() if twin_sync is not None else set()
+                rig_ids = twin_rig.actor_ids() if twin_rig is not None else set()
                 vehicles = [v for v in world.get_actors().filter("vehicle.*")
                             if v.id not in _traffic_actor_ids
-                            and v.attributes.get("role_name") != "trajectory"]
-                sensors = world.get_actors().filter("sensor.*")
+                            and v.id not in twin_ids
+                            and v.attributes.get("role_name") not in ("trajectory", "twin_object")]
+                sensors = [s for s in world.get_actors().filter("sensor.*")
+                           if s.id not in rig_ids
+                           and s.attributes.get("role_name") != "twin_rig"]
                 # Boot-time V2X props are intentional; only sweep if we find a
                 # runaway count (>2x the tracked snapshot), which indicates
                 # stacked spawns from prior sessions.
@@ -563,6 +704,12 @@ async def main():
     logger.info("  Drive WS    : ws://0.0.0.0:%d", port)
     logger.info("  V2X objects : %d tracked", len(shared_prop_pool))
     logger.info("  State pub   : %s", "active" if uplink else "disabled (no AWS)")
+    logger.info(
+        "  Twin        : rig=%s sync=%s (cameras config %s)",
+        config.TWIN_RIG,
+        config.TWIN_SYNC,
+        "loaded" if cameras_config else "missing",
+    )
     logger.info("=" * 60)
 
     tick_task = None
@@ -572,6 +719,11 @@ async def main():
     try:
         tick_task = asyncio.create_task(tick_loop())
         audit_task = asyncio.create_task(periodic_actor_audit())
+
+        try:
+            start_twin()
+        except Exception:
+            logger.warning("Twin startup failed (non-fatal)", exc_info=True)
 
         # Publish state.json to S3 so the web dashboard stays live
         if uplink is not None and registry is not None:
@@ -597,6 +749,12 @@ async def main():
                     task.cancel()
                 except Exception:
                     pass
+
+        # Stop the digital twin (server-owned rig cameras + synced actors).
+        try:
+            stop_twin()
+        except Exception as e:
+            logger.debug("Twin stop on shutdown failed: %s", e)
 
         # Stop any active trajectory playback (server-owned, not session-owned).
         try:

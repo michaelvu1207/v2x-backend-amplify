@@ -47,8 +47,8 @@
 
 	<nav class="hidden items-center gap-2 md:flex">
 		<a
-			href="/"
-			class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/')}`}
+			href="/drive?view=twin"
+			class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/drive')}`}
 			>
 				Digital Twin View
 			</a>
@@ -76,8 +76,8 @@
 	<div class="flex items-center gap-5">
 		<nav class="flex items-center gap-2 md:hidden">
 			<a
-				href="/"
-				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/')}`}
+				href="/drive?view=twin"
+				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/drive')}`}
 			>
 				Digital Twin
 			</a>

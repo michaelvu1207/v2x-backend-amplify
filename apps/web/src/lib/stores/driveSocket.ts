@@ -46,6 +46,8 @@ export const v2xAlerts = writable<V2xAlert[]>([]);
 export const trajectoryList = writable<TrajectoryInfo[]>([]);
 export const trajectoryStatus = writable<TrajectoryStatus>({ active: false });
 export const dynamicActors = writable<DynamicActor[]>([]);
+// Aspect ratio of the streamed ego camera (updated by CameraSettingsPanel).
+export const cameraAspect = writable<{ w: number; h: number }>({ w: 720, h: 720 });
 
 // OpenSCENARIO (.xosc) state
 export const xoscScenarioList = writable<XoscScenarioInfo[]>([]);

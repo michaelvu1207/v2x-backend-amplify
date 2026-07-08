@@ -35,6 +35,25 @@ def env_optional(name):
         return None
     return value
 
+DEFAULT_CAMERAS_JSON = Path(__file__).resolve().parents[2] / "config" / "cameras.json"
+
+def load_cameras_config():
+    """Load the shared camera-pose config used by perception and the twin rig.
+
+    Path override via V2X_CAMERAS_JSON. Returns None when unavailable so the
+    caller can fall back to the legacy hardcoded values.
+    """
+    path = os.getenv("V2X_CAMERAS_JSON") or str(DEFAULT_CAMERAS_JSON)
+    try:
+        with open(path) as f:
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"cameras config unavailable ({path}): {exc}")
+        return None
+    if not config.get("cameras"):
+        return None
+    return config
+
 def parse_video_paths():
     value = os.getenv("V2X_PERCEPTION_VIDEO_PATHS", "").strip()
     if value:
@@ -104,6 +123,7 @@ class FrameBroadcaster:
                 "device_id": det.get("device_id"),
                 "track_id": det.get("track_id"),
                 "bbox": metadata.get("bbox"),
+                "gps_location": det.get("gps_location"),
             })
 
         with self.condition:
@@ -1129,23 +1149,46 @@ class VideoObjectDetector:
         return annotated
 
 if __name__ == "__main__":
-    K = np.array([
-        [1325.4,      0, 1280.0],  # fx=1325.4, cx=1280
-        [     0, 1325.4,  960.0],  # fy=1325.4, cy=960
-        [     0,      0,      1]
-    ], dtype=np.float64)
-
-    base_lat = 37.91560117034595
-    base_lon = -122.33478756387032
-
     model_path = os.getenv("V2X_PERCEPTION_MODEL_PATH", "yolov8n.pt")
     conf = env_float("V2X_PERCEPTION_CONFIDENCE", 0.5)
-    cam1 = VideoObjectDetector(model_path, conf, K, None, 7.0, -39.20, -46.06, 200.0, "cam-001-ch1", base_lat, base_lon, "Richmond", "CA", "USA")
-    cam2 = VideoObjectDetector(model_path, conf, K, None, 7.0, -40.52, 71.25, 300.0,"cam-001-ch2", base_lat, base_lon, "Richmond", "CA", "USA")
-    cam3 = VideoObjectDetector(model_path, conf, K, None, 7.0, -30.42, 14.58, 315.0, "cam-001-ch3", base_lat, base_lon, "Richmond", "CA", "USA")
-    cam4 = VideoObjectDetector(model_path, conf, K, None, 7.0, -43.48, -22.63, 260.0, "cam-001-ch4", base_lat, base_lon, "Richmond", "CA", "USA")
 
-    pipeline = MultiCameraPipeline(detectors=[cam1, cam2, cam3, cam4])
+    cameras_config = load_cameras_config()
+    detectors = []
+    if cameras_config:
+        site = cameras_config.get("site", {})
+        for cam in cameras_config["cameras"]:
+            intr = cam["intrinsics"]
+            K = np.array([
+                [intr["fx"], 0, intr["cx"]],
+                [0, intr["fy"], intr["cy"]],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            detectors.append(VideoObjectDetector(
+                model_path, conf, K, None,
+                cam["height_m"], cam["pitch_deg"], cam["yaw_deg"], cam["heading_deg"],
+                cam["device_id"],
+                site.get("lat", 0.0), site.get("lon", 0.0),
+                site.get("city", ""), site.get("state", ""), site.get("country", ""),
+            ))
+    else:
+        # Legacy fallback: values predate config/cameras.json
+        K = np.array([
+            [1325.4,      0, 1280.0],  # fx=1325.4, cx=1280
+            [     0, 1325.4,  960.0],  # fy=1325.4, cy=960
+            [     0,      0,      1]
+        ], dtype=np.float64)
+
+        base_lat = 37.91560117034595
+        base_lon = -122.33478756387032
+
+        detectors = [
+            VideoObjectDetector(model_path, conf, K, None, 7.0, -39.20, -46.06, 200.0, "cam-001-ch1", base_lat, base_lon, "Richmond", "CA", "USA"),
+            VideoObjectDetector(model_path, conf, K, None, 7.0, -40.52, 71.25, 300.0, "cam-001-ch2", base_lat, base_lon, "Richmond", "CA", "USA"),
+            VideoObjectDetector(model_path, conf, K, None, 7.0, -30.42, 14.58, 315.0, "cam-001-ch3", base_lat, base_lon, "Richmond", "CA", "USA"),
+            VideoObjectDetector(model_path, conf, K, None, 7.0, -43.48, -22.63, 260.0, "cam-001-ch4", base_lat, base_lon, "Richmond", "CA", "USA"),
+        ]
+
+    pipeline = MultiCameraPipeline(detectors=detectors)
 
     video_paths = parse_video_paths()
     camera_ids = parse_camera_ids(video_paths)
