@@ -59,6 +59,12 @@
 				Street View Live
 			</a>
 			<a
+				href="/timeline"
+				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/timeline')}`}
+			>
+				Timeline
+			</a>
+			<a
 				href="/demo-videos"
 				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/demo-videos')}`}
 			>
@@ -80,6 +86,12 @@
 				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/live')}`}
 			>
 				Street View Live
+			</a>
+			<a
+				href="/timeline"
+				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/timeline')}`}
+			>
+				Timeline
 			</a>
 			<a
 				href="/demo-videos"

@@ -23,6 +23,8 @@ READ_POLICY_NAME="${READ_POLICY_NAME:-v2x-backend-detections-ddb-read}"
 VIDEO_AWS_REGION="${VIDEO_AWS_REGION:-us-west-2}"
 VIDEO_STREAM_PREFIX="${VIDEO_STREAM_PREFIX:-v2x-backend-cam-}"
 VIDEO_HLS_EXPIRES_SECONDS="${VIDEO_HLS_EXPIRES_SECONDS:-300}"
+VIDEO_ONDEMAND_EXPIRES_SECONDS="${VIDEO_ONDEMAND_EXPIRES_SECONDS:-3600}"
+SITE_GEOHASH="${SITE_GEOHASH:-9q9p8}"
 SNAPSHOT_URL_EXPIRES_SECONDS="${SNAPSHOT_URL_EXPIRES_SECONDS:-300}"
 DEMO_VIDEOS_PREFIX="${DEMO_VIDEOS_PREFIX:-demo-videos/}"
 DEMO_VIDEO_URL_EXPIRES_SECONDS="${DEMO_VIDEO_URL_EXPIRES_SECONDS:-3600}"
@@ -59,7 +61,8 @@ if [[ "${ATTACH_DDB_READ_POLICY}" == "true" ]]; then
       "Effect":"Allow",
       "Action":[
         "kinesisvideo:DescribeStream",
-        "kinesisvideo:GetDataEndpoint"
+        "kinesisvideo:GetDataEndpoint",
+        "kinesisvideo:ListFragments"
       ],
       "Resource":[
         "arn:aws:kinesisvideo:${VIDEO_AWS_REGION}:${ACCOUNT_ID}:stream/${VIDEO_STREAM_PREFIX}*"
@@ -103,12 +106,13 @@ import base64
 import json
 import mimetypes
 import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import quote
 from botocore.config import Config as BotoConfig
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 TABLE_NAME = os.environ.get("TABLE_NAME", "${TABLE_NAME}")
@@ -117,6 +121,8 @@ MAX_LIMIT = int(os.environ.get("MAX_LIMIT", "200"))
 VIDEO_AWS_REGION = os.environ.get("VIDEO_AWS_REGION", "${VIDEO_AWS_REGION}")
 VIDEO_STREAM_PREFIX = os.environ.get("VIDEO_STREAM_PREFIX", "${VIDEO_STREAM_PREFIX}")
 VIDEO_HLS_EXPIRES_SECONDS = int(os.environ.get("VIDEO_HLS_EXPIRES_SECONDS", "${VIDEO_HLS_EXPIRES_SECONDS}"))
+VIDEO_ONDEMAND_EXPIRES_SECONDS = int(os.environ.get("VIDEO_ONDEMAND_EXPIRES_SECONDS", "${VIDEO_ONDEMAND_EXPIRES_SECONDS}"))
+SITE_GEOHASH = os.environ.get("SITE_GEOHASH", "${SITE_GEOHASH}")
 STATE_BUCKET = os.environ.get("STATE_BUCKET", "${STATE_BUCKET}")
 SNAPSHOT_URL_EXPIRES_SECONDS = int(os.environ.get("SNAPSHOT_URL_EXPIRES_SECONDS", "${SNAPSHOT_URL_EXPIRES_SECONDS}"))
 DEMO_VIDEOS_PREFIX = os.environ.get("DEMO_VIDEOS_PREFIX", "${DEMO_VIDEOS_PREFIX}")
@@ -309,23 +315,104 @@ def _get_demo_videos():
 def _camera_stream_name(camera_id):
     return f"{VIDEO_STREAM_PREFIX}{camera_id}"
 
-def _get_hls_session(camera_id):
+def _parse_ts(value):
+    """Parse an ISO-8601 timestamp (with optional trailing Z) to aware UTC."""
+    if not value:
+        return None
+    v = str(value).strip()
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+def _iso_millis(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+def _ts_event_bounds(start_dt, end_dt):
+    # ts_event is "{timestamp_utc}#{event_id}" with millisecond timestamps.
+    # Normalising both bounds to millisecond precision keeps the lexicographic
+    # BETWEEN correct; "~" sorts after both "Z" and "#".
+    return _iso_millis(start_dt), _iso_millis(end_dt) + "~"
+
+def _resolve_window(qs, default_hours=24, max_hours=48):
+    start_dt = _parse_ts(qs.get("start"))
+    end_dt = _parse_ts(qs.get("end"))
+    if end_dt is None:
+        end_dt = datetime.now(timezone.utc)
+    if start_dt is None:
+        start_dt = end_dt - timedelta(hours=default_hours)
+    if start_dt >= end_dt:
+        return None, None, _resp(400, {"error": "invalid_range", "detail": "start must be before end"})
+    if end_dt - start_dt > timedelta(hours=max_hours):
+        start_dt = end_dt - timedelta(hours=max_hours)
+    return start_dt, end_dt, None
+
+def _archived_media_client(stream_name, api_name):
+    endpoint = video_client.get_data_endpoint(
+        StreamName=stream_name,
+        APIName=api_name,
+    )["DataEndpoint"]
+    return boto3.client(
+        "kinesis-video-archived-media",
+        region_name=VIDEO_AWS_REGION,
+        endpoint_url=endpoint,
+        config=BotoConfig(retries={"max_attempts": 3}),
+    )
+
+def _get_hls_session(camera_id, qs):
     if camera_id not in ALLOWED_CAMERA_IDS:
         return _resp(404, {"error": "camera_not_found", "cameraId": camera_id})
 
     stream_name = _camera_stream_name(camera_id)
+    start_dt = _parse_ts(qs.get("start"))
+    end_dt = _parse_ts(qs.get("end"))
+    on_demand = start_dt is not None or end_dt is not None
+
+    if on_demand:
+        if start_dt is None or end_dt is None:
+            return _resp(400, {"error": "invalid_range", "detail": "archive playback requires both start and end"})
+        if start_dt >= end_dt:
+            return _resp(400, {"error": "invalid_range", "detail": "start must be before end"})
+        if end_dt - start_dt > timedelta(hours=24):
+            return _resp(400, {"error": "invalid_range", "detail": "window must be 24 hours or less"})
 
     try:
-        endpoint = video_client.get_data_endpoint(
-            StreamName=stream_name,
-            APIName="GET_HLS_STREAMING_SESSION_URL",
-        )["DataEndpoint"]
-        archived_media = boto3.client(
-            "kinesis-video-archived-media",
-            region_name=VIDEO_AWS_REGION,
-            endpoint_url=endpoint,
-            config=BotoConfig(retries={"max_attempts": 3}),
-        )
+        archived_media = _archived_media_client(stream_name, "GET_HLS_STREAMING_SESSION_URL")
+        if on_demand:
+            hls_url = archived_media.get_hls_streaming_session_url(
+                StreamName=stream_name,
+                PlaybackMode="ON_DEMAND",
+                HLSFragmentSelector={
+                    "FragmentSelectorType": "SERVER_TIMESTAMP",
+                    "TimestampRange": {
+                        "StartTimestamp": start_dt,
+                        "EndTimestamp": end_dt,
+                    },
+                },
+                Expires=VIDEO_ONDEMAND_EXPIRES_SECONDS,
+                ContainerFormat="FRAGMENTED_MP4",
+                DiscontinuityMode="ON_DISCONTINUITY",
+                DisplayFragmentTimestamp="ALWAYS",
+                MaxMediaPlaylistFragmentResults=5000,
+            )["HLSStreamingSessionURL"]
+            return _resp(
+                200,
+                {
+                    "cameraId": camera_id,
+                    "streamName": stream_name,
+                    "playbackMode": "ON_DEMAND",
+                    "hlsUrl": hls_url,
+                    "expiresIn": VIDEO_ONDEMAND_EXPIRES_SECONDS,
+                    "start": _iso_millis(start_dt),
+                    "end": _iso_millis(end_dt),
+                    "region": VIDEO_AWS_REGION,
+                },
+            )
         hls_url = archived_media.get_hls_streaming_session_url(
             StreamName=stream_name,
             PlaybackMode="LIVE",
@@ -359,36 +446,236 @@ def _get_hls_session(camera_id):
             },
         )
 
-def _timestamp_in_range(item, start, end):
-    timestamp = item.get("timestamp_utc") or ""
-    if not timestamp:
-        return False
-    if start and timestamp < start:
-        return False
-    if end and timestamp > end:
-        return False
-    return True
+def _get_video_coverage(camera_id, qs):
+    """Merged fragment intervals so the timeline UI can grey out gaps."""
+    if camera_id not in ALLOWED_CAMERA_IDS:
+        return _resp(404, {"error": "camera_not_found", "cameraId": camera_id})
 
-def _get_detections_range(qs, limit):
-    start = qs.get("start") or ""
-    end = qs.get("end") or ""
+    stream_name = _camera_stream_name(camera_id)
+    start_dt, end_dt, err = _resolve_window(qs)
+    if err:
+        return err
 
-    # DynamoDB has no global timestamp index in the current table schema.
-    # Keep this as a bounded scan so callers get the expected route today.
-    scan_limit = max(limit, min(MAX_LIMIT, limit * 4))
-    kwargs = {"Limit": scan_limit}
-    resp = table.scan(**kwargs)
-    items = [
-        _strip_api_fields(item)
-        for item in (resp.get("Items", []) or [])
-        if _timestamp_in_range(item, start, end)
-    ]
-    items = sorted(items, key=lambda x: (x.get("timestamp_utc") or ""), reverse=True)
+    try:
+        archived_media = _archived_media_client(stream_name, "LIST_FRAGMENTS")
+        fragments = []
+        next_token = None
+        pages = 0
+        while pages < 25:
+            kwargs = {
+                "StreamName": stream_name,
+                "MaxResults": 1000,
+                "FragmentSelector": {
+                    "FragmentSelectorType": "SERVER_TIMESTAMP",
+                    "TimestampRange": {
+                        "StartTimestamp": start_dt,
+                        "EndTimestamp": end_dt,
+                    },
+                },
+            }
+            if next_token:
+                kwargs["NextToken"] = next_token
+            resp = archived_media.list_fragments(**kwargs)
+            fragments.extend(resp.get("Fragments", []) or [])
+            next_token = resp.get("NextToken")
+            pages += 1
+            if not next_token:
+                break
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "ClientError")
+        status = 404 if error_code in {"ResourceNotFoundException", "NoDataRetentionException"} else 502
+        return _resp(status, {"error": "video_coverage_unavailable", "cameraId": camera_id, "detail": error_code})
+
+    spans = sorted(
+        (
+            (
+                f["ServerTimestamp"],
+                f["ServerTimestamp"] + timedelta(milliseconds=int(f.get("FragmentLengthInMilliseconds") or 0)),
+            )
+            for f in fragments
+            if f.get("ServerTimestamp") is not None
+        ),
+        key=lambda pair: pair[0],
+    )
+
+    gap_tolerance = timedelta(seconds=15)
+    intervals = []
+    for span_start, span_end in spans:
+        if intervals and span_start - intervals[-1][1] <= gap_tolerance:
+            if span_end > intervals[-1][1]:
+                intervals[-1][1] = span_end
+        else:
+            intervals.append([span_start, span_end])
+
     return _resp(
         200,
         {
-            "items": _jsonable(items[:limit]),
+            "cameraId": camera_id,
+            "start": _iso_millis(start_dt),
+            "end": _iso_millis(end_dt),
+            "intervals": [
+                {"start": _iso_millis(s), "end": _iso_millis(e)} for s, e in intervals
+            ],
+            "fragmentCount": len(fragments),
+            "truncated": next_token is not None,
+        },
+    )
+
+def _range_filter_expression(qs):
+    filters = []
+    device_id = (qs.get("device_id") or "").strip()
+    object_type = (qs.get("object_type") or "").strip()
+    if device_id:
+        filters.append(Attr("device_id").eq(device_id))
+    if object_type:
+        filters.append(Attr("object_type").eq(object_type))
+    if not filters:
+        return None
+    condition = filters[0]
+    for extra in filters[1:]:
+        condition = condition & extra
+    return condition
+
+def _get_detections_range(qs, limit, exclusive_start_key):
+    # All detections at the site share one precision-5 geohash, so the
+    # geohash+ts_event GSI doubles as a time index.
+    start_dt, end_dt, err = _resolve_window(qs)
+    if err:
+        return err
+
+    start_key, end_key = _ts_event_bounds(start_dt, end_dt)
+    kwargs = {
+        "IndexName": GSI_NAME,
+        "KeyConditionExpression": Key("geohash").eq(SITE_GEOHASH)
+        & Key("ts_event").between(start_key, end_key),
+        "Limit": limit,
+        "ScanIndexForward": False,
+    }
+    condition = _range_filter_expression(qs)
+    if condition is not None:
+        kwargs["FilterExpression"] = condition
+    if exclusive_start_key:
+        kwargs["ExclusiveStartKey"] = exclusive_start_key
+    resp = table.query(**kwargs)
+    items = [_strip_api_fields(x) for x in (resp.get("Items", []) or [])]
+    return _resp(
+        200,
+        {
+            "items": _jsonable(items),
             "next": _b64(resp.get("LastEvaluatedKey")),
+            "start": _iso_millis(start_dt),
+            "end": _iso_millis(end_dt),
+        },
+    )
+
+TIMELINE_MAX_PAGES = int(os.environ.get("TIMELINE_MAX_PAGES", "40"))
+
+def _get_detections_timeline(qs):
+    """Aggregate a time window into track events + a per-bucket histogram.
+
+    Grouping happens here so the browser never has to page through tens of
+    thousands of raw detection rows to draw timeline markers.
+    """
+    start_dt, end_dt, err = _resolve_window(qs)
+    if err:
+        return err
+
+    try:
+        bucket_seconds = int(qs.get("bucket") or "60")
+    except ValueError:
+        bucket_seconds = 60
+    bucket_seconds = max(10, min(3600, bucket_seconds))
+
+    start_key, end_key = _ts_event_bounds(start_dt, end_dt)
+    base_kwargs = {
+        "IndexName": GSI_NAME,
+        "KeyConditionExpression": Key("geohash").eq(SITE_GEOHASH)
+        & Key("ts_event").between(start_key, end_key),
+        "ScanIndexForward": True,
+        "ProjectionExpression": "object_id, object_type, timestamp_utc, device_id, confidence_score",
+    }
+    condition = _range_filter_expression(qs)
+    if condition is not None:
+        base_kwargs["FilterExpression"] = condition
+
+    tracks = {}
+    buckets = {}
+    total = 0
+    truncated = False
+    exclusive_start_key = None
+    for _ in range(TIMELINE_MAX_PAGES):
+        kwargs = dict(base_kwargs)
+        if exclusive_start_key:
+            kwargs["ExclusiveStartKey"] = exclusive_start_key
+        resp = table.query(**kwargs)
+        for item in resp.get("Items", []) or []:
+            ts = _parse_ts(item.get("timestamp_utc"))
+            if ts is None:
+                continue
+            total += 1
+            object_id = str(item.get("object_id") or "unknown")
+            object_type = str(item.get("object_type") or "unknown")
+            confidence = item.get("confidence_score")
+            confidence = float(confidence) if isinstance(confidence, (int, float, Decimal)) else 0.0
+
+            track = tracks.get(object_id)
+            if track is None:
+                tracks[object_id] = {
+                    "object_id": object_id,
+                    "object_type": object_type,
+                    "device_id": str(item.get("device_id") or ""),
+                    "first_seen": ts,
+                    "last_seen": ts,
+                    "count": 1,
+                    "max_confidence": confidence,
+                }
+            else:
+                track["count"] += 1
+                if ts < track["first_seen"]:
+                    track["first_seen"] = ts
+                if ts > track["last_seen"]:
+                    track["last_seen"] = ts
+                if confidence > track["max_confidence"]:
+                    track["max_confidence"] = confidence
+
+            bucket_idx = int((ts - start_dt).total_seconds() // bucket_seconds)
+            counts = buckets.setdefault(bucket_idx, {})
+            counts[object_type] = counts.get(object_type, 0) + 1
+
+        exclusive_start_key = resp.get("LastEvaluatedKey")
+        if not exclusive_start_key:
+            break
+    else:
+        truncated = True
+
+    events = sorted(tracks.values(), key=lambda t: t["first_seen"])
+    return _resp(
+        200,
+        {
+            "start": _iso_millis(start_dt),
+            "end": _iso_millis(end_dt),
+            "bucketSeconds": bucket_seconds,
+            "totalDetections": total,
+            "truncated": truncated,
+            "events": [
+                {
+                    "object_id": t["object_id"],
+                    "object_type": t["object_type"],
+                    "device_id": t["device_id"],
+                    "first_seen": _iso_millis(t["first_seen"]),
+                    "last_seen": _iso_millis(t["last_seen"]),
+                    "count": t["count"],
+                    "max_confidence": round(t["max_confidence"], 4),
+                }
+                for t in events
+            ],
+            "histogram": [
+                {
+                    "bucket_start": _iso_millis(start_dt + timedelta(seconds=idx * bucket_seconds)),
+                    "counts": buckets[idx],
+                }
+                for idx in sorted(buckets)
+            ],
         },
     )
 
@@ -408,7 +695,14 @@ def handler(event, context):
 
     if path.startswith("/video/session/"):
         camera_id = path_params.get("camera_id") or path.split("/video/session/", 1)[1]
-        return _get_hls_session(camera_id)
+        return _get_hls_session(camera_id, qs)
+
+    if path.startswith("/video/coverage/"):
+        camera_id = path_params.get("camera_id") or path.split("/video/coverage/", 1)[1]
+        return _get_video_coverage(camera_id, qs)
+
+    if path == "/detections/timeline":
+        return _get_detections_timeline(qs)
 
     if path == "/demo-videos":
         return _get_demo_videos()
@@ -466,7 +760,7 @@ def handler(event, context):
         )
 
     if path == "/detections/range":
-        return _get_detections_range(qs, limit)
+        return _get_detections_range(qs, limit, exclusive_start_key)
 
     if path == "/detections/recent":
         # NOTE: DynamoDB has no global "recent" query without a dedicated index.
@@ -498,9 +792,11 @@ def handler(event, context):
                     "/snapshots/{object_id}/latest",
                     "/detections/range",
                     "/detections/recent",
+                    "/detections/timeline",
                     "/detections/object/{object_id}",
                     "/detections/geohash/{geohash}",
                     "/video/session/{camera_id}",
+                    "/video/coverage/{camera_id}",
                 ],
             },
         )
@@ -516,8 +812,8 @@ if ! aws lambda get-function --function-name "${READ_LAMBDA_NAME}" >/dev/null 2>
     --runtime python3.12 \
     --handler index.handler \
     --role "${ROLE_ARN}" \
-    --timeout 10 \
-    --environment "Variables={TABLE_NAME=${TABLE_NAME},GSI_NAME=gsi_geohash_time,MAX_LIMIT=200,VIDEO_AWS_REGION=${VIDEO_AWS_REGION},VIDEO_STREAM_PREFIX=${VIDEO_STREAM_PREFIX},VIDEO_HLS_EXPIRES_SECONDS=${VIDEO_HLS_EXPIRES_SECONDS},STATE_BUCKET=${STATE_BUCKET},SNAPSHOT_URL_EXPIRES_SECONDS=${SNAPSHOT_URL_EXPIRES_SECONDS},DEMO_VIDEOS_PREFIX=${DEMO_VIDEOS_PREFIX},DEMO_VIDEO_URL_EXPIRES_SECONDS=${DEMO_VIDEO_URL_EXPIRES_SECONDS}}" \
+    --timeout 30 \
+    --environment "Variables={TABLE_NAME=${TABLE_NAME},GSI_NAME=gsi_geohash_time,MAX_LIMIT=200,VIDEO_AWS_REGION=${VIDEO_AWS_REGION},VIDEO_STREAM_PREFIX=${VIDEO_STREAM_PREFIX},VIDEO_HLS_EXPIRES_SECONDS=${VIDEO_HLS_EXPIRES_SECONDS},STATE_BUCKET=${STATE_BUCKET},SNAPSHOT_URL_EXPIRES_SECONDS=${SNAPSHOT_URL_EXPIRES_SECONDS},DEMO_VIDEOS_PREFIX=${DEMO_VIDEOS_PREFIX},DEMO_VIDEO_URL_EXPIRES_SECONDS=${DEMO_VIDEO_URL_EXPIRES_SECONDS},VIDEO_ONDEMAND_EXPIRES_SECONDS=${VIDEO_ONDEMAND_EXPIRES_SECONDS},SITE_GEOHASH=${SITE_GEOHASH}}" \
     --zip-file "fileb://${WORKDIR}/function.zip" >/dev/null
 else
   aws lambda update-function-code \
@@ -526,13 +822,13 @@ else
 
       aws lambda update-function-configuration \
         --function-name "${READ_LAMBDA_NAME}" \
-        --timeout 10 \
-        --environment "Variables={TABLE_NAME=${TABLE_NAME},GSI_NAME=gsi_geohash_time,MAX_LIMIT=200,VIDEO_AWS_REGION=${VIDEO_AWS_REGION},VIDEO_STREAM_PREFIX=${VIDEO_STREAM_PREFIX},VIDEO_HLS_EXPIRES_SECONDS=${VIDEO_HLS_EXPIRES_SECONDS},STATE_BUCKET=${STATE_BUCKET},SNAPSHOT_URL_EXPIRES_SECONDS=${SNAPSHOT_URL_EXPIRES_SECONDS},DEMO_VIDEOS_PREFIX=${DEMO_VIDEOS_PREFIX},DEMO_VIDEO_URL_EXPIRES_SECONDS=${DEMO_VIDEO_URL_EXPIRES_SECONDS}}" >/dev/null || {
+        --timeout 30 \
+        --environment "Variables={TABLE_NAME=${TABLE_NAME},GSI_NAME=gsi_geohash_time,MAX_LIMIT=200,VIDEO_AWS_REGION=${VIDEO_AWS_REGION},VIDEO_STREAM_PREFIX=${VIDEO_STREAM_PREFIX},VIDEO_HLS_EXPIRES_SECONDS=${VIDEO_HLS_EXPIRES_SECONDS},STATE_BUCKET=${STATE_BUCKET},SNAPSHOT_URL_EXPIRES_SECONDS=${SNAPSHOT_URL_EXPIRES_SECONDS},DEMO_VIDEOS_PREFIX=${DEMO_VIDEOS_PREFIX},DEMO_VIDEO_URL_EXPIRES_SECONDS=${DEMO_VIDEO_URL_EXPIRES_SECONDS},VIDEO_ONDEMAND_EXPIRES_SECONDS=${VIDEO_ONDEMAND_EXPIRES_SECONDS},SITE_GEOHASH=${SITE_GEOHASH}}" >/dev/null || {
       aws lambda wait function-updated --function-name "${READ_LAMBDA_NAME}"
       aws lambda update-function-configuration \
         --function-name "${READ_LAMBDA_NAME}" \
-        --timeout 10 \
-        --environment "Variables={TABLE_NAME=${TABLE_NAME},GSI_NAME=gsi_geohash_time,MAX_LIMIT=200,VIDEO_AWS_REGION=${VIDEO_AWS_REGION},VIDEO_STREAM_PREFIX=${VIDEO_STREAM_PREFIX},VIDEO_HLS_EXPIRES_SECONDS=${VIDEO_HLS_EXPIRES_SECONDS},STATE_BUCKET=${STATE_BUCKET},SNAPSHOT_URL_EXPIRES_SECONDS=${SNAPSHOT_URL_EXPIRES_SECONDS},DEMO_VIDEOS_PREFIX=${DEMO_VIDEOS_PREFIX},DEMO_VIDEO_URL_EXPIRES_SECONDS=${DEMO_VIDEO_URL_EXPIRES_SECONDS}}" >/dev/null
+        --timeout 30 \
+        --environment "Variables={TABLE_NAME=${TABLE_NAME},GSI_NAME=gsi_geohash_time,MAX_LIMIT=200,VIDEO_AWS_REGION=${VIDEO_AWS_REGION},VIDEO_STREAM_PREFIX=${VIDEO_STREAM_PREFIX},VIDEO_HLS_EXPIRES_SECONDS=${VIDEO_HLS_EXPIRES_SECONDS},STATE_BUCKET=${STATE_BUCKET},SNAPSHOT_URL_EXPIRES_SECONDS=${SNAPSHOT_URL_EXPIRES_SECONDS},DEMO_VIDEOS_PREFIX=${DEMO_VIDEOS_PREFIX},DEMO_VIDEO_URL_EXPIRES_SECONDS=${DEMO_VIDEO_URL_EXPIRES_SECONDS},VIDEO_ONDEMAND_EXPIRES_SECONDS=${VIDEO_ONDEMAND_EXPIRES_SECONDS},SITE_GEOHASH=${SITE_GEOHASH}}" >/dev/null
     }
 fi
 
@@ -567,6 +863,8 @@ aws apigatewayv2 create-route --api-id "${API_ID}" --route-key "GET /map-data" -
 aws apigatewayv2 create-route --api-id "${API_ID}" --route-key "GET /drive-config" --target "integrations/${INTEGRATION_ID}" >/dev/null || true
 aws apigatewayv2 create-route --api-id "${API_ID}" --route-key "GET /snapshots/{object_id}/latest" --target "integrations/${INTEGRATION_ID}" >/dev/null || true
 aws apigatewayv2 create-route --api-id "${API_ID}" --route-key "GET /video/session/{camera_id}" --target "integrations/${INTEGRATION_ID}" >/dev/null || true
+aws apigatewayv2 create-route --api-id "${API_ID}" --route-key "GET /video/coverage/{camera_id}" --target "integrations/${INTEGRATION_ID}" >/dev/null || true
+aws apigatewayv2 create-route --api-id "${API_ID}" --route-key "GET /detections/timeline" --target "integrations/${INTEGRATION_ID}" >/dev/null || true
 
 if [[ "${STAGE_NAME}" == "\$default" ]]; then
   aws apigatewayv2 create-stage --api-id "${API_ID}" --stage-name "\$default" --auto-deploy >/dev/null || true

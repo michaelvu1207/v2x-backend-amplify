@@ -28,10 +28,51 @@ export interface SnapshotHistoryEntry {
 export interface VideoSession {
 	cameraId: string;
 	streamName: string;
-	playbackMode: 'LIVE' | string;
+	playbackMode: 'LIVE' | 'ON_DEMAND' | string;
 	hlsUrl: string;
 	expiresIn: number;
 	region: string;
+	start?: string;
+	end?: string;
+}
+
+export interface CoverageInterval {
+	start: string;
+	end: string;
+}
+
+export interface VideoCoverage {
+	cameraId: string;
+	start: string;
+	end: string;
+	intervals: CoverageInterval[];
+	fragmentCount: number;
+	truncated: boolean;
+}
+
+export interface TimelineEvent {
+	object_id: string;
+	object_type: string;
+	device_id: string;
+	first_seen: string;
+	last_seen: string;
+	count: number;
+	max_confidence: number;
+}
+
+export interface TimelineHistogramBucket {
+	bucket_start: string;
+	counts: Record<string, number>;
+}
+
+export interface DetectionTimeline {
+	start: string;
+	end: string;
+	bucketSeconds: number;
+	totalDetections: number;
+	truncated: boolean;
+	events: TimelineEvent[];
+	histogram: TimelineHistogramBucket[];
 }
 
 export type DetectionQueryMode = 'recent' | 'object' | 'geohash';

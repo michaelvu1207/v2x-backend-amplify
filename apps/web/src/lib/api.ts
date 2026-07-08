@@ -3,6 +3,8 @@ import type {
 	DemoVideo,
 	DetectionPage,
 	DetectionQueryMode,
+	DetectionTimeline,
+	VideoCoverage,
 	VideoSession
 } from './types';
 
@@ -64,25 +66,113 @@ export async function fetchMapDataFull(): Promise<MapDataResponse> {
 	return (await response.json()) as MapDataResponse;
 }
 
-export async function fetchVideoSession(cameraId: string): Promise<VideoSession> {
+async function readErrorDetail(response: Response): Promise<string> {
+	let detail = `${response.status}`;
+	try {
+		const body = (await response.json()) as { detail?: string; error?: string };
+		detail = body.detail || body.error || detail;
+	} catch {
+		// Keep the HTTP status fallback.
+	}
+	return detail;
+}
+
+export async function fetchVideoSession(
+	cameraId: string,
+	archiveWindow?: { start: string; end: string }
+): Promise<VideoSession> {
 	const config = await loadRuntimeConfig();
-	const response = await fetch(
-		`${config.apiBaseUrl.replace(/\/+$/, '')}/video/session/${encodeURIComponent(cameraId)}`,
-		{ cache: 'no-store' }
+	const url = new URL(
+		`${config.apiBaseUrl.replace(/\/+$/, '')}/video/session/${encodeURIComponent(cameraId)}`
 	);
+	if (archiveWindow) {
+		url.searchParams.set('start', archiveWindow.start);
+		url.searchParams.set('end', archiveWindow.end);
+	}
+	const response = await fetch(url, { cache: 'no-store' });
 
 	if (!response.ok) {
-		let detail = `${response.status}`;
-		try {
-			const body = (await response.json()) as { detail?: string; error?: string };
-			detail = body.detail || body.error || detail;
-		} catch {
-			// Keep the HTTP status fallback.
-		}
-		throw new Error(`Failed to fetch video session: ${detail}`);
+		throw new Error(`Failed to fetch video session: ${await readErrorDetail(response)}`);
 	}
 
 	return (await response.json()) as VideoSession;
+}
+
+export async function fetchVideoCoverage(
+	cameraId: string,
+	window: { start: string; end: string }
+): Promise<VideoCoverage> {
+	const config = await loadRuntimeConfig();
+	const url = new URL(
+		`${config.apiBaseUrl.replace(/\/+$/, '')}/video/coverage/${encodeURIComponent(cameraId)}`
+	);
+	url.searchParams.set('start', window.start);
+	url.searchParams.set('end', window.end);
+	const response = await fetch(url, { cache: 'no-store' });
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch video coverage: ${await readErrorDetail(response)}`);
+	}
+
+	return (await response.json()) as VideoCoverage;
+}
+
+export async function fetchDetectionTimeline(options: {
+	start: string;
+	end: string;
+	bucketSeconds?: number;
+	deviceId?: string;
+	objectType?: string;
+}): Promise<DetectionTimeline> {
+	const config = await loadRuntimeConfig();
+	const url = new URL(`${config.detectionsApiBaseUrl.replace(/\/+$/, '')}/detections/timeline`);
+	url.searchParams.set('start', options.start);
+	url.searchParams.set('end', options.end);
+	if (options.bucketSeconds) {
+		url.searchParams.set('bucket', String(options.bucketSeconds));
+	}
+	if (options.deviceId) {
+		url.searchParams.set('device_id', options.deviceId);
+	}
+	if (options.objectType) {
+		url.searchParams.set('object_type', options.objectType);
+	}
+	const response = await fetch(url, {
+		headers: { accept: 'application/json' },
+		cache: 'no-store'
+	});
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch detection timeline: ${await readErrorDetail(response)}`);
+	}
+
+	return (await response.json()) as DetectionTimeline;
+}
+
+export async function fetchDetectionsRange(options: {
+	start: string;
+	end: string;
+	limit?: number;
+	next?: string | null;
+}): Promise<DetectionPage> {
+	const config = await loadRuntimeConfig();
+	const url = new URL(`${config.detectionsApiBaseUrl.replace(/\/+$/, '')}/detections/range`);
+	url.searchParams.set('start', options.start);
+	url.searchParams.set('end', options.end);
+	url.searchParams.set('limit', String(options.limit || 50));
+	if (options.next) {
+		url.searchParams.set('next', options.next);
+	}
+	const response = await fetch(url, {
+		headers: { accept: 'application/json' },
+		cache: 'no-store'
+	});
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch detections range: ${await readErrorDetail(response)}`);
+	}
+
+	return (await response.json()) as DetectionPage;
 }
 
 export async function fetchDemoVideos(): Promise<DemoVideo[]> {

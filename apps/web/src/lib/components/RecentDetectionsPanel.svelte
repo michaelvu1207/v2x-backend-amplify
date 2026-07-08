@@ -1,20 +1,24 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
-	import { fetchDetectionsPage } from '$lib/api';
+	import { fetchDetectionsPage, fetchDetectionsRange } from '$lib/api';
 	import type { DetectionItem } from '$lib/types';
 
 	interface Props {
 		limit?: number;
 		refreshMs?: number;
+		/** When set, shows detections in this window instead of live-polling. */
+		range?: { start: string; end: string } | null;
+		highlightObjectId?: string | null;
 	}
 
-	let { limit = 25, refreshMs = 5000 }: Props = $props();
+	let { limit = 25, refreshMs = 5000, range = null, highlightObjectId = null }: Props = $props();
 
 	let items = $state<DetectionItem[]>([]);
 	let isLoading = $state(false);
 	let error = $state<string | null>(null);
 	let lastUpdated = $state<string | null>(null);
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
+	let loadedRangeKey = '';
 
 	function displayValue(value: unknown): string {
 		return value == null ? '' : String(value);
@@ -30,10 +34,9 @@
 		isLoading = items.length === 0;
 
 		try {
-			const response = await fetchDetectionsPage({
-				mode: 'recent',
-				limit
-			});
+			const response = range
+				? await fetchDetectionsRange({ start: range.start, end: range.end, limit })
+				: await fetchDetectionsPage({ mode: 'recent', limit });
 			items = response.items || [];
 			lastUpdated = new Date().toLocaleTimeString();
 		} catch (err) {
@@ -43,18 +46,38 @@
 		}
 	}
 
-	onMount(() => {
-		void loadItems();
+	function startPolling() {
+		stopPolling();
 		refreshTimer = setInterval(() => {
 			void loadItems();
 		}, refreshMs);
-	});
+	}
 
-	onDestroy(() => {
+	function stopPolling() {
 		if (refreshTimer) {
 			clearInterval(refreshTimer);
 			refreshTimer = null;
 		}
+	}
+
+	$effect(() => {
+		const key = range ? `${range.start}|${range.end}` : 'live';
+		if (key === loadedRangeKey) return;
+		loadedRangeKey = key;
+		void loadItems();
+		if (range) {
+			stopPolling();
+		} else {
+			startPolling();
+		}
+	});
+
+	onMount(() => {
+		if (!range) startPolling();
+	});
+
+	onDestroy(() => {
+		stopPolling();
 	});
 </script>
 
@@ -62,7 +85,14 @@
 	<div class="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-4">
 		<div class="flex flex-wrap items-center justify-between gap-3">
 			<div>
-				<h1 class="text-lg font-semibold text-white">Objects DB</h1>
+				<h1 class="text-lg font-semibold text-white">
+					Objects DB
+					{#if range}
+						<span class="ml-2 align-middle text-[10px] font-medium tracking-[0.16em] text-amber-300 uppercase">Time-locked</span>
+					{:else}
+						<span class="ml-2 align-middle text-[10px] font-medium tracking-[0.16em] text-emerald-300 uppercase">Live</span>
+					{/if}
+				</h1>
 				{#if lastUpdated}
 					<p class="mt-1 text-xs text-gray-500">Updated {lastUpdated}</p>
 				{/if}
@@ -105,7 +135,13 @@
 						</tr>
 					{:else}
 						{#each items as item}
-							<tr class="border-b border-gray-900/80 transition hover:bg-white/[0.03]">
+							<tr
+								class={`border-b border-gray-900/80 transition hover:bg-white/[0.03] ${
+									highlightObjectId != null && item.object_id === highlightObjectId
+										? 'bg-amber-400/10'
+										: ''
+								}`}
+							>
 								<td class="px-4 py-3 align-top">{displayValue(item.timestamp_utc)}</td>
 								<td class="px-4 py-3 align-top">{displayValue(item.object_id)}</td>
 								<td class="px-4 py-3 align-top">{displayValue(item.object_type)}</td>
