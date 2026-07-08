@@ -4,6 +4,7 @@ import type {
 	DetectionPage,
 	DetectionQueryMode,
 	DetectionTimeline,
+	LivePerceptionDetections,
 	VideoCoverage,
 	VideoSession
 } from './types';
@@ -239,4 +240,32 @@ export async function fetchDetectionsPage(options: {
 	}
 
 	return (await response.json()) as DetectionPage;
+}
+
+function buildPerceptionMetadataBaseUrl(config: Awaited<ReturnType<typeof loadRuntimeConfig>>): string {
+	if (config.perceptionStreamBaseUrl) {
+		return config.perceptionStreamBaseUrl.replace(/\/+$/, '');
+	}
+
+	const firstStreamUrl = Object.values(config.perceptionStreamUrls)[0];
+	if (!firstStreamUrl) {
+		throw new Error('Perception stream metadata is not configured.');
+	}
+
+	return new URL(firstStreamUrl).origin;
+}
+
+export async function fetchLivePerceptionDetections(): Promise<LivePerceptionDetections> {
+	const config = await loadRuntimeConfig();
+	const baseUrl = buildPerceptionMetadataBaseUrl(config);
+	const response = await fetch(`${baseUrl}/detections/latest?_t=${Date.now()}`, {
+		headers: { accept: 'application/json' },
+		cache: 'no-store'
+	});
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch live perception detections: ${response.status}`);
+	}
+
+	return (await response.json()) as LivePerceptionDetections;
 }

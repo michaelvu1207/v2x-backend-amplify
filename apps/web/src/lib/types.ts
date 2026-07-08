@@ -91,6 +91,32 @@ export interface DetectionPage {
 	next?: string | null;
 }
 
+export interface LivePerceptionDetection {
+	object_id?: string | null;
+	object_type?: string | null;
+	confidence_score?: number | string | null;
+	timestamp_utc?: string | null;
+	device_id?: string | null;
+	track_id?: number | string | null;
+	bbox?: {
+		x1?: number;
+		y1?: number;
+		x2?: number;
+		y2?: number;
+	} | null;
+}
+
+export interface LivePerceptionCamera {
+	updated_at?: string | null;
+	frame_count?: number;
+	detections?: LivePerceptionDetection[];
+}
+
+export interface LivePerceptionDetections {
+	generated_at?: string | null;
+	cameras?: Record<string, LivePerceptionCamera>;
+}
+
 export interface DemoVideo {
 	key: string;
 	fileName: string;

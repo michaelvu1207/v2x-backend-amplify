@@ -16,7 +16,7 @@ class TestCarlaConnectionMapSelection:
         client = MockClient(world)
         client.available_maps = [
             "Richmond_Field_Station_Richmond_CA",
-            "San_Ramon",
+            "/Game/Carla/Maps/San_Ramon_P1_Roads",
         ]
         monkeypatch.setattr(
             carla_connection_module.carla,
@@ -27,8 +27,8 @@ class TestCarlaConnectionMapSelection:
         conn = CarlaConnection(Config(CARLA_MAP="San_Ramon"))
         conn.connect()
 
-        assert client.loaded_maps == ["San_Ramon"]
-        assert conn.carla_map.name == "San_Ramon"
+        assert client.loaded_maps == ["/Game/Carla/Maps/San_Ramon_P1_Roads"]
+        assert conn.carla_map.name == "/Game/Carla/Maps/San_Ramon_P1_Roads"
         assert conn.world.get_settings().synchronous_mode is True
 
         conn.disconnect()
@@ -50,5 +50,33 @@ class TestCarlaConnectionMapSelection:
         assert client.loaded_maps == []
         assert conn.carla_map.name == "Richmond_Field_Station_Richmond_CA"
         assert conn.world.get_settings().synchronous_mode is True
+
+        conn.disconnect()
+
+    def test_switch_drive_map_accepts_only_public_map_choices(self, monkeypatch):
+        world = MockWorld()
+        world._map = MockMap("Richmond_Field_Station_Richmond_CA")
+        client = MockClient(world)
+        client.available_maps = [
+            "/Game/Carla/Maps/Richmond_Field_Station_Richmond_CA",
+            "/Game/Carla/Maps/San_Ramon_P1_Roads",
+        ]
+        monkeypatch.setattr(
+            carla_connection_module.carla,
+            "Client",
+            lambda host, port: client,
+        )
+
+        conn = CarlaConnection(Config(CARLA_MAP="Richmond_Field_Station_Richmond_CA"))
+        conn.connect()
+
+        result = conn.switch_drive_map("san_ramon")
+
+        assert result["changed"] is True
+        assert result["current_map"] == "san_ramon"
+        assert client.loaded_maps[-1] == "/Game/Carla/Maps/San_Ramon_P1_Roads"
+        assert conn.world.get_settings().synchronous_mode is True
+        with pytest.raises(ValueError, match="Unsupported drive map"):
+            conn.switch_drive_map("Town10HD")
 
         conn.disconnect()

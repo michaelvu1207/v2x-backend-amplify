@@ -84,7 +84,12 @@ class MockWeatherParameters:
     sun_altitude_angle: float = 0.0
     fog_density: float = 0.0
     fog_distance: float = 0.0
+    fog_falloff: float = 0.0
     wetness: float = 0.0
+    scattering_intensity: float = 1.0
+    mie_scattering_scale: float = 0.03
+    rayleigh_scattering_scale: float = 0.0331
+    dust_storm: float = 0.0
 
 
 class MockDebugHelper:
@@ -298,15 +303,15 @@ class MockWorld:
             self._actors[0] = MockActor(0, "spectator")
         return self._actors[0]
 
-    def try_spawn_actor(self, blueprint, transform, attach_to=None) -> Optional[MockActor]:
+    def try_spawn_actor(self, blueprint, transform, attach_to=None, **kwargs) -> Optional[MockActor]:
         actor = MockActor(self._next_id, getattr(blueprint, "id", "unknown"))
         self._actors[actor.id] = actor
         actor._transform = transform
         self._next_id += 1
         return actor
 
-    def spawn_actor(self, blueprint, transform, attach_to=None) -> MockActor:
-        actor = self.try_spawn_actor(blueprint, transform, attach_to)
+    def spawn_actor(self, blueprint, transform, attach_to=None, **kwargs) -> MockActor:
+        actor = self.try_spawn_actor(blueprint, transform, attach_to, **kwargs)
         if actor is None:
             raise RuntimeError("Failed to spawn actor")
         return actor
@@ -423,6 +428,10 @@ def _install_fake_carla_module() -> None:
     fake_carla.Map = MockMap
     fake_carla.World = MockWorld
     fake_carla.Vehicle = MockActor
+    fake_carla.AttachmentType = types.SimpleNamespace(
+        Rigid="Rigid",
+        SpringArmGhost="SpringArmGhost",
+    )
     sys.modules["carla"] = fake_carla
 
 
