@@ -1,9 +1,21 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import TwinCameraView from './TwinCameraView.svelte';
 	import LiveVideoCard from './LiveVideoCard.svelte';
+	import ArchiveVideoCard from './ArchiveVideoCard.svelte';
 	import RecentDetectionsPanel from './RecentDetectionsPanel.svelte';
+	import TimelineStrip from './TimelineStrip.svelte';
+	import { fetchDetectionTimeline } from '$lib/api';
 	import { loadRuntimeConfig, type RuntimeConfig } from '$lib/runtime-config';
+	import {
+		TIMELINE_SPAN_MS,
+		formatClock,
+		parseIsoMs,
+		toIsoMillis,
+		windowForCursor,
+		type PlaybackWindow
+	} from '$lib/timeline';
+	import type { DetectionTimeline, TimelineEvent } from '$lib/types';
 
 	interface Props {
 		/** Drive server WS base URL (the selected tunnel). */
@@ -16,7 +28,30 @@
 	let selectedCamera = $state('ch1');
 	let showAll = $state(false);
 
+	// ── Replay control channel (shared world: one mode for all viewers) ──
+	let mode = $state<'live' | 'replay'>('live');
+	let replaySupported = $state(false);
+	let replayClockMs = $state<number | null>(null);
+	let controlError = $state<string | null>(null);
+	let controlWs: WebSocket | null = null;
+	let controlKey = '';
+	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// ── Timeline (markers over the past 24h of recorded detections) ──
+	let timeline = $state<DetectionTimeline | null>(null);
+	let nowMs = $state(Date.now());
+	let viewStartMs = $state(Date.now() - TIMELINE_SPAN_MS);
+	let viewEndMs = $state(Date.now());
+	let selectedObjectId = $state<string | null>(null);
+	let clockTimer: ReturnType<typeof setInterval> | null = null;
+	let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+	// Right-pane archive playback window follows the replay clock.
+	let playbackWindow = $state<PlaybackWindow | null>(null);
+	let seekNonce = $state(0);
+
 	let cameraIds = $derived(config?.videoCameraIds ?? ['ch1', 'ch2', 'ch3', 'ch4']);
+	let cursorMs = $derived(mode === 'replay' && replayClockMs !== null ? replayClockMs : nowMs);
 
 	function perceptionStreamUrl(cameraId: string): string {
 		if (!config) return '';
@@ -30,17 +65,193 @@
 		return `${config.perceptionStreamBaseUrl}${path.startsWith('/') ? path : `/${path}`}`;
 	}
 
+	function disconnectControl() {
+		if (reconnectTimer) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = null;
+		}
+		if (controlWs) {
+			controlWs.onclose = null;
+			controlWs.close();
+			controlWs = null;
+		}
+	}
+
+	function connectControl() {
+		disconnectControl();
+		const base = wsBaseUrl.replace(/\/+$/, '');
+		if (!base) return;
+		try {
+			controlWs = new WebSocket(`${base}/twin?control=1`);
+		} catch {
+			return;
+		}
+		controlWs.onmessage = (event) => {
+			if (typeof event.data !== 'string') return;
+			try {
+				const msg = JSON.parse(event.data);
+				if (msg.type === 'twin_hello' && msg.sync) {
+					mode = msg.sync.mode === 'replay' ? 'replay' : 'live';
+					replaySupported = Boolean(msg.sync.replay_supported);
+					replayClockMs = parseIsoMs(msg.sync.replay_clock);
+				} else if (msg.type === 'twin_mode' || msg.type === 'twin_clock') {
+					mode = msg.mode === 'replay' ? 'replay' : 'live';
+					replaySupported = Boolean(msg.replay_supported ?? replaySupported);
+					replayClockMs = parseIsoMs(msg.replay_clock);
+					if (msg.type === 'twin_mode') controlError = null;
+				} else if (msg.type === 'twin_error') {
+					controlError = msg.message ?? 'Twin control error';
+				}
+			} catch {
+				// ignore malformed frames
+			}
+		};
+		controlWs.onclose = () => {
+			reconnectTimer = setTimeout(connectControl, 3000);
+		};
+	}
+
+	function sendControl(payload: Record<string, unknown>) {
+		if (!controlWs || controlWs.readyState !== WebSocket.OPEN) {
+			controlError = 'Twin control channel not connected';
+			return;
+		}
+		controlError = null;
+		controlWs.send(JSON.stringify(payload));
+	}
+
+	function replayAt(epochMs: number) {
+		const clamped = Math.min(Math.max(epochMs, Date.now() - TIMELINE_SPAN_MS), Date.now() - 1000);
+		sendControl({ type: 'twin_replay', start: toIsoMillis(clamped) });
+		replayClockMs = clamped;
+		updatePlaybackWindow(clamped, true);
+	}
+
+	function goLive() {
+		sendControl({ type: 'twin_live' });
+		selectedObjectId = null;
+		playbackWindow = null;
+	}
+
+	function updatePlaybackWindow(epochMs: number, forceSeek = false) {
+		const win = windowForCursor(epochMs, Date.now());
+		if (!playbackWindow || win.start !== playbackWindow.start || win.end !== playbackWindow.end) {
+			playbackWindow = win;
+		}
+		if (forceSeek) seekNonce += 1;
+	}
+
+	function handleScrub(epochMs: number) {
+		if (Date.now() - epochMs < 20_000) {
+			goLive();
+			return;
+		}
+		replayAt(epochMs);
+	}
+
+	function handleSelectEvent(event: TimelineEvent) {
+		selectedObjectId = event.object_id;
+		const firstSeen = parseIsoMs(event.first_seen);
+		if (firstSeen !== null) {
+			replayAt(firstSeen - 5_000);
+		}
+		if (event.device_id) {
+			const channel = event.device_id.split('-').pop();
+			if (channel && cameraIds.includes(channel)) {
+				selectedCamera = channel;
+				showAll = false;
+			}
+		}
+	}
+
+	async function loadTimeline() {
+		try {
+			const end = Date.now();
+			timeline = await fetchDetectionTimeline({
+				start: toIsoMillis(end - TIMELINE_SPAN_MS),
+				end: toIsoMillis(end),
+				bucketSeconds: 60
+			});
+		} catch {
+			// markers are best-effort; the strip still allows blind scrubbing
+		}
+	}
+
+	// Keep the archive window tracking the advancing replay clock.
+	$effect(() => {
+		if (mode === 'replay' && replayClockMs !== null) {
+			updatePlaybackWindow(replayClockMs);
+		}
+	});
+
+	$effect(() => {
+		const key = wsBaseUrl;
+		if (key === controlKey) return;
+		controlKey = key;
+		connectControl();
+	});
+
 	onMount(async () => {
 		config = await loadRuntimeConfig();
+		void loadTimeline();
+		clockTimer = setInterval(() => {
+			nowMs = Date.now();
+			if (mode === 'live') {
+				viewEndMs = nowMs;
+				viewStartMs = nowMs - TIMELINE_SPAN_MS;
+			}
+		}, 1000);
+		refreshTimer = setInterval(() => void loadTimeline(), 60_000);
+	});
+
+	onDestroy(() => {
+		disconnectControl();
+		if (clockTimer) clearInterval(clockTimer);
+		if (refreshTimer) clearInterval(refreshTimer);
 	});
 </script>
 
+{#snippet realPane(cameraId: string)}
+	{#if mode === 'replay' && playbackWindow}
+		<ArchiveVideoCard
+			{cameraId}
+			windowStart={playbackWindow.start}
+			windowEnd={playbackWindow.end}
+			windowStartMs={playbackWindow.startMs}
+			cursorMs={replayClockMs ?? playbackWindow.startMs}
+			{seekNonce}
+			playing={true}
+		/>
+	{:else}
+		<LiveVideoCard
+			{cameraId}
+			streamUrl={perceptionStreamUrl(cameraId)}
+			sourceLabel={perceptionStreamUrl(cameraId) ? 'Perception' : 'Raw'}
+		/>
+	{/if}
+{/snippet}
+
 <div class="flex h-full flex-col overflow-y-auto bg-gray-950">
-	<div class="flex items-center gap-2 border-b border-gray-800 px-4 py-3">
+	<div class="flex flex-wrap items-center gap-2 border-b border-gray-800 px-4 py-3">
 		<span class="text-[11px] font-semibold tracking-[0.18em] text-gray-300 uppercase">
-			Digital Twin · Live Mirror
+			Digital Twin
 		</span>
-		<div class="ml-4 flex items-center gap-1">
+		<button
+			class={`border px-3 py-1 text-[11px] font-semibold tracking-[0.14em] uppercase transition ${
+				mode === 'live'
+					? 'border-emerald-400/60 bg-emerald-400/10 text-emerald-200'
+					: 'border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-500 hover:text-white'
+			}`}
+			onclick={goLive}
+		>
+			Live
+		</button>
+		{#if mode === 'replay'}
+			<span class="border border-amber-400/60 bg-amber-400/10 px-3 py-1 font-mono text-[11px] text-amber-200">
+				Replay · {replayClockMs !== null ? formatClock(replayClockMs) : '…'}
+			</span>
+		{/if}
+		<div class="ml-2 flex items-center gap-1">
 			{#each cameraIds as cameraId}
 				<button
 					class={`border px-3 py-1 text-[11px] font-medium tracking-[0.14em] uppercase transition ${
@@ -68,34 +279,65 @@
 			</button>
 		</div>
 		<span class="ml-auto text-[11px] text-gray-500">
-			Left: CARLA twin render · Right: real street camera
+			Left: CARLA twin · Right: {mode === 'replay' ? 'recorded street video' : 'real street camera'}
 		</span>
 	</div>
+
+	{#if controlError}
+		<p class="border-b border-gray-800 px-4 py-2 text-[11px] text-rose-300">{controlError}</p>
+	{/if}
 
 	{#if showAll}
 		<div class="grid grid-cols-1 gap-px bg-gray-900 xl:grid-cols-2">
 			{#each cameraIds as cameraId}
 				<div class="grid grid-cols-2 gap-px bg-gray-900">
 					<TwinCameraView {cameraId} {wsBaseUrl} />
-					<LiveVideoCard
-						{cameraId}
-						streamUrl={perceptionStreamUrl(cameraId)}
-						sourceLabel={perceptionStreamUrl(cameraId) ? 'Perception' : 'Raw'}
-					/>
+					{@render realPane(cameraId)}
 				</div>
 			{/each}
 		</div>
 	{:else}
 		<div class="grid grid-cols-1 gap-px bg-gray-900 lg:grid-cols-2">
 			<TwinCameraView cameraId={selectedCamera} {wsBaseUrl} />
-			<LiveVideoCard
-				cameraId={selectedCamera}
-				streamUrl={perceptionStreamUrl(selectedCamera)}
-				sourceLabel={perceptionStreamUrl(selectedCamera) ? 'Perception' : 'Raw'}
-			/>
+			{@render realPane(selectedCamera)}
 		</div>
 	{/if}
 
-	<!-- Live Objects DB feeding the twin -->
-	<RecentDetectionsPanel limit={25} />
+	<!-- Scrub the twin through the past 24h of recorded detections -->
+	<div class="px-4 py-3">
+		<TimelineStrip
+			{viewStartMs}
+			{viewEndMs}
+			{cursorMs}
+			liveEdgeMs={nowMs}
+			events={timeline?.events ?? []}
+			histogram={timeline?.histogram ?? []}
+			bucketSeconds={timeline?.bucketSeconds ?? 60}
+			coverage={[]}
+			{selectedObjectId}
+			onScrub={handleScrub}
+			onSelectEvent={handleSelectEvent}
+			onViewChange={(startMs, endMs) => {
+				viewStartMs = startMs;
+				viewEndMs = endMs;
+			}}
+		/>
+		{#if !replaySupported && mode === 'live'}
+			<p class="mt-1 text-[11px] text-gray-600">
+				Scrub to replay the twin from recorded detections (past 24h).
+			</p>
+		{/if}
+	</div>
+
+	<!-- Objects DB: live, or time-locked to the replay clock -->
+	<RecentDetectionsPanel
+		limit={25}
+		range={mode === 'replay' && replayClockMs !== null
+			? {
+					start: toIsoMillis(Math.floor(replayClockMs / 10_000) * 10_000 - 30_000),
+					end: toIsoMillis(Math.floor(replayClockMs / 10_000) * 10_000 + 30_000)
+				}
+			: null}
+		highlightObjectId={selectedObjectId}
+	/>
 </div>

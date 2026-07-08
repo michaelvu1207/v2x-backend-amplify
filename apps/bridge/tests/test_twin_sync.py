@@ -131,6 +131,100 @@ class TestTick:
         assert track.actor_id is None
 
 
+class TestReplay:
+    def make_replay_sync(self, mock_world, monkeypatch, items):
+        monkeypatch.setattr(
+            twin_sync_module,
+            "gps_to_carla",
+            lambda m, lat, lon: MockLocation((lat - 37.9) * 1000.0, (lon + 122.3) * 1000.0, 0.0),
+        )
+        pools = {
+            "vehicle.*": [MockBlueprint("vehicle.tesla.model3")],
+            "walker.pedestrian.*": [MockBlueprint("walker.pedestrian.0001")],
+        }
+        mock_world._blueprint_library.filter = lambda pattern: list(pools.get(pattern, []))
+        calls = []
+
+        def fetcher(start, end, limit=200):
+            calls.append((start, end))
+            return {"items": [i for i in items if start <= i["timestamp_utc"] <= end]}
+
+        sync = TwinSync(
+            mock_world, mock_world.get_map(),
+            poll_interval=1.0, despawn_after=12.0, range_fetcher=fetcher,
+        )
+        return sync, calls
+
+    def test_replay_requires_fetcher(self, sync):
+        import pytest as _pytest
+        with _pytest.raises(RuntimeError):
+            sync.start_replay(time.time() - 3600)
+        assert sync.status()["replay_supported"] is False
+
+    def test_replay_feeds_recorded_detections(self, mock_world, monkeypatch):
+        start = time.time() - 3600.0
+        iso = twin_sync_module._epoch_to_iso
+        items = [{
+            "object_id": "global_car_9", "object_type": "car",
+            "timestamp_utc": iso(start + 1.0),
+            "gps_location": {"latitude": 37.9155, "longitude": -122.3348},
+        }]
+        sync, calls = self.make_replay_sync(mock_world, monkeypatch, items)
+        sync.start_replay(start)
+        assert sync.mode == "replay"
+        # Pretend 5s of wall time elapsed since replay start.
+        sync._replay["wall0"] = time.time() - 5.0
+        sync._fetch_replay_chunk()
+        sync._apply_pending_replay()
+        assert len(sync.actor_ids()) == 1
+        assert calls and calls[0][0].startswith(iso(start)[:19])
+        clock = sync.replay_clock()
+        assert abs(clock - (start + 5.0)) < 1.0
+
+    def test_replay_despawns_by_virtual_clock(self, mock_world, monkeypatch):
+        start = time.time() - 3600.0
+        iso = twin_sync_module._epoch_to_iso
+        items = [{
+            "object_id": "global_car_9", "object_type": "car",
+            "timestamp_utc": iso(start + 1.0),
+            "gps_location": {"latitude": 37.9155, "longitude": -122.3348},
+        }]
+        sync, _ = self.make_replay_sync(mock_world, monkeypatch, items)
+        sync.start_replay(start)
+        sync._replay["wall0"] = time.time() - 5.0
+        sync._fetch_replay_chunk()
+        sync._apply_pending_replay()
+        assert len(sync.actor_ids()) == 1
+        # Jump the virtual clock far past the detection: despawn on next step.
+        sync._replay["wall0"] = time.time() - 60.0
+        sync._replay["cursor"] = start + 30.0
+        sync._fetch_replay_chunk()
+        sync._apply_pending_replay()
+        assert sync.actor_ids() == set()
+
+    def test_go_live_clears_replay_actors(self, mock_world, monkeypatch):
+        start = time.time() - 3600.0
+        iso = twin_sync_module._epoch_to_iso
+        items = [{
+            "object_id": "global_car_9", "object_type": "car",
+            "timestamp_utc": iso(start + 1.0),
+            "gps_location": {"latitude": 37.9155, "longitude": -122.3348},
+        }]
+        sync, _ = self.make_replay_sync(mock_world, monkeypatch, items)
+        sync.start_replay(start)
+        sync._replay["wall0"] = time.time() - 5.0
+        sync._fetch_replay_chunk()
+        sync._apply_pending_replay()
+        actor_ids = set(sync.actor_ids())
+        assert actor_ids
+        sync.go_live()
+        assert sync.mode == "live"
+        assert sync.replay_clock() is None
+        assert sync.actor_ids() == set()
+        for actor_id in actor_ids:
+            assert mock_world.get_actor(actor_id).is_destroyed
+
+
 class TestFetchParsing:
     def test_flattens_cameras_and_skips_stale(self, sync, monkeypatch):
         from datetime import datetime, timedelta, timezone

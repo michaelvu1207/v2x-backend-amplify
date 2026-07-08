@@ -30,6 +30,32 @@ VEHICLE_TYPES = {"car", "truck", "bus"}
 BLUEPRINT_BLOCKLIST = ("firetruck", "ambulance", "police")
 
 
+def _parse_utc_epoch(value) -> Optional[float]:
+    """ISO-8601 (optionally with trailing Z) -> epoch seconds, or None."""
+    if not value:
+        return None
+    from datetime import datetime, timezone
+
+    v = str(value).strip()
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _epoch_to_iso(epoch: float) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f"
+    )[:-3] + "Z"
+
+
 class TwinTrack:
     """One mirrored real-world object and its CARLA actor."""
 
@@ -66,6 +92,7 @@ class TwinSync:
         poll_interval: float = 1.0,
         despawn_after: float = 12.0,
         detection_max_age: float = 8.0,
+        range_fetcher=None,
     ) -> None:
         self._world = world
         self._map = carla_map
@@ -73,6 +100,9 @@ class TwinSync:
         self._poll_interval = poll_interval
         self._despawn_after = despawn_after
         self._detection_max_age = detection_max_age
+        # Callable (start_iso, end_iso, limit) -> {"items": [...]} against the
+        # detections DB; enables replaying the twin at past timestamps.
+        self._range_fetcher = range_fetcher
         self._tracks: Dict[str, TwinTrack] = {}
         self._vehicle_blueprints: List[object] = []
         self._truck_blueprints: List[object] = []
@@ -80,6 +110,9 @@ class TwinSync:
         self._blueprints_loaded = False
         self._stopped = False
         self._poll_failures = 0
+        self._mode = "live"
+        self._replay: Optional[dict] = None
+        self._pending_replay = None
 
     # ------------------------------------------------------------------
     # Blueprint selection
@@ -194,11 +227,13 @@ class TwinSync:
             detections.extend(camera.get("detections") or [])
         return detections
 
-    def _apply(self, detections: list) -> None:
+    def _apply(self, detections: list, now: Optional[float] = None,
+               use_detection_ts: bool = False) -> None:
         import carla
 
         self._load_blueprints()
-        now = time.time()
+        if now is None:
+            now = time.time()
 
         for det in detections:
             object_id = det.get("object_id")
@@ -214,7 +249,11 @@ class TwinSync:
             if track is None:
                 track = TwinTrack(object_id, object_type)
                 self._tracks[object_id] = track
-            track.last_seen = now
+            if use_detection_ts:
+                det_ts = _parse_utc_epoch(det.get("timestamp_utc"))
+                track.last_seen = det_ts if det_ts is not None else now
+            else:
+                track.last_seen = now
 
             location = self._location_for(track, float(lat), float(lon))
 
@@ -250,7 +289,9 @@ class TwinSync:
                     if math.hypot(dx, dy) > 1.5:
                         track.yaw = math.degrees(math.atan2(dy, dx))
                 track.target = location
-                track.lerp_start = now
+                # Lerp progress always runs on the wall clock, even when
+                # `now` is a replay clock.
+                track.lerp_start = time.time()
                 track.lerp_duration = self._poll_interval
 
         self._despawn_stale(now)
@@ -276,6 +317,52 @@ class TwinSync:
         track.actor_id = None
 
     # ------------------------------------------------------------------
+    # Replay (drive the twin from recorded detections)
+    # ------------------------------------------------------------------
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def replay_supported(self) -> bool:
+        return self._range_fetcher is not None
+
+    def replay_clock(self) -> Optional[float]:
+        """Current virtual time of the replay (epoch seconds)."""
+        if self._replay is None:
+            return None
+        r = self._replay
+        return r["start"] + (time.time() - r["wall0"]) * r["speed"]
+
+    def start_replay(self, start_epoch: float, speed: float = 1.0) -> None:
+        """Switch the twin to replaying recorded detections from a timestamp.
+
+        The detections DB keeps 24h (TTL), so any timestamp in that window
+        replays; the rig cameras then render the past scene live.
+        """
+        if self._range_fetcher is None:
+            raise RuntimeError("Replay unavailable: no detections range fetcher")
+        self.clear()
+        self._mode = "replay"
+        self._replay = {
+            "start": start_epoch,
+            "wall0": time.time(),
+            "speed": max(0.25, min(float(speed), 8.0)),
+            "cursor": start_epoch,
+        }
+        logger.info("Twin replay started at %s (speed %.2fx)",
+                    _epoch_to_iso(start_epoch), self._replay["speed"])
+
+    def go_live(self) -> None:
+        """Return the twin to mirroring live detections."""
+        if self._mode != "live":
+            logger.info("Twin returning to live mode")
+        self.clear()
+        self._mode = "live"
+        self._replay = None
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -285,10 +372,14 @@ class TwinSync:
         logger.info("Twin sync polling %s every %.1fs", self._detections_url, self._poll_interval)
         while not self._stopped:
             try:
-                detections = await loop.run_in_executor(None, self._fetch_detections)
-                self._poll_failures = 0
-                if detections is not None:
-                    self._apply(detections)
+                if self._mode == "replay":
+                    await loop.run_in_executor(None, self._fetch_replay_chunk)
+                    self._apply_pending_replay()
+                else:
+                    detections = await loop.run_in_executor(None, self._fetch_detections)
+                    self._poll_failures = 0
+                    if detections is not None and self._mode == "live":
+                        self._apply(detections)
             except requests.RequestException as exc:
                 self._poll_failures += 1
                 if self._poll_failures in (1, 10) or self._poll_failures % 60 == 0:
@@ -299,6 +390,36 @@ class TwinSync:
             except Exception:
                 logger.error("Twin sync apply error", exc_info=True)
             await asyncio.sleep(self._poll_interval)
+
+    def _fetch_replay_chunk(self) -> None:
+        """Blocking part of a replay step: fetch the next detections chunk."""
+        replay = self._replay
+        if replay is None:
+            return
+        clock = self.replay_clock()
+        cursor = replay["cursor"]
+        if clock is None or clock <= cursor:
+            self._pending_replay = ([], clock)
+            return
+        chunk_end = min(clock, cursor + 30.0)
+        result = self._range_fetcher(
+            _epoch_to_iso(cursor), _epoch_to_iso(chunk_end), 200
+        )
+        items = result.get("items", []) or []
+        items.sort(key=lambda item: item.get("timestamp_utc") or "")
+        self._pending_replay = (items, clock)
+        replay["cursor"] = chunk_end
+
+    def _apply_pending_replay(self) -> None:
+        """Actor mutations for a replay step (runs on the event loop)."""
+        pending = getattr(self, "_pending_replay", None)
+        self._pending_replay = None
+        if pending is None or self._replay is None:
+            return
+        items, clock = pending
+        if clock is None:
+            return
+        self._apply(items, now=clock, use_detection_ts=True)
 
     def tick(self) -> None:
         """Advance position lerps; called from the bridge tick loop."""
@@ -333,17 +454,25 @@ class TwinSync:
         return {t.actor_id for t in self._tracks.values() if t.actor_id is not None}
 
     def status(self) -> dict:
+        clock = self.replay_clock()
         return {
             "tracks": len(self._tracks),
             "actors": len(self.actor_ids()),
             "poll_failures": self._poll_failures,
             "detections_url": self._detections_url,
+            "mode": self._mode,
+            "replay_supported": self.replay_supported,
+            "replay_clock": _epoch_to_iso(clock) if clock is not None else None,
         }
+
+    def clear(self) -> None:
+        """Destroy all twin actors and forget tracks (keeps polling)."""
+        for track in self._tracks.values():
+            self._destroy_track(track)
+        self._tracks.clear()
 
     def stop(self) -> None:
         """Stop polling and destroy all twin actors."""
         self._stopped = True
-        for track in self._tracks.values():
-            self._destroy_track(track)
-        self._tracks.clear()
+        self.clear()
         logger.info("Twin sync stopped")

@@ -360,6 +360,9 @@ async def main():
                 detections_url=config.TWIN_DETECTIONS_URL,
                 poll_interval=config.TWIN_POLL_INTERVAL,
                 despawn_after=config.TWIN_DESPAWN_SECONDS,
+                # Detections DB fetcher: lets /twin clients replay the twin
+                # at any timestamp in the DB's 24h retention window.
+                range_fetcher=make_api_fetcher(config),
             )
             runtime["twin_sync"] = sync
             twin_sync_task["task"] = asyncio.get_running_loop().create_task(sync.run())
@@ -527,15 +530,26 @@ async def main():
             pump_task.cancel()
 
     async def _serve_twin(websocket):
-        """Stream one twin camera's JPEG frames as binary messages."""
+        """Stream one twin camera's JPEG frames as binary messages.
+
+        Also speaks a small JSON control protocol (works on any /twin
+        connection, or a frame-less one opened with ?control=1):
+          -> {"type": "twin_replay", "start": ISO, "speed"?: float}
+          -> {"type": "twin_live"}
+          <- {"type": "twin_mode", ...}   (response + on change)
+          <- {"type": "twin_clock", ...}  (every second)
+        Replay switches the shared world, so every viewer sees it.
+        """
         import json
+        from datetime import datetime, timezone
         from urllib.parse import parse_qs, urlparse
 
         query = parse_qs(urlparse(websocket.request.path).query)
         camera_id = (query.get("cam") or ["ch1"])[0]
+        control_only = (query.get("control") or ["0"])[0] in ("1", "true")
         rig = runtime.get("twin_rig")
         sync = runtime.get("twin_sync")
-        if rig is None or not rig.has_camera(camera_id):
+        if not control_only and (rig is None or not rig.has_camera(camera_id)):
             await websocket.send(json.dumps({
                 "type": "twin_error",
                 "message": f"Twin camera '{camera_id}' unavailable",
@@ -544,34 +558,108 @@ async def main():
             await websocket.close()
             return
 
-        status = rig.status()
+        def mode_payload():
+            payload = {"type": "twin_mode", "mode": "off", "replay_supported": False}
+            if sync is not None:
+                status = sync.status()
+                payload.update({
+                    "mode": status["mode"],
+                    "replay_supported": status["replay_supported"],
+                    "replay_clock": status["replay_clock"],
+                    "tracks": status["tracks"],
+                })
+            return payload
+
+        rig_status = rig.status() if rig is not None else {"width": 0, "height": 0, "fps": 1.0, "cameras": []}
         await websocket.send(json.dumps({
             "type": "twin_hello",
-            "camera_id": camera_id,
-            "width": status["width"],
-            "height": status["height"],
-            "fps": status["fps"],
-            "cameras": status["cameras"],
+            "camera_id": None if control_only else camera_id,
+            "width": rig_status["width"],
+            "height": rig_status["height"],
+            "fps": rig_status["fps"],
+            "cameras": rig_status["cameras"],
             "sync": sync.status() if sync is not None else None,
         }))
-        logger.info("Twin stream opened for %s (%s)", camera_id, websocket.remote_address)
+        logger.info(
+            "Twin %s opened for %s (%s)",
+            "control" if control_only else "stream", camera_id, websocket.remote_address,
+        )
 
-        interval = 1.0 / max(status["fps"], 1.0)
+        def parse_iso_epoch(value):
+            v = str(value or "").strip()
+            if v.endswith("Z"):
+                v = v[:-1] + "+00:00"
+            dt = datetime.fromisoformat(v)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+
+        async def handle_control(raw):
+            try:
+                msg = json.loads(raw)
+            except (TypeError, ValueError):
+                return {"type": "twin_error", "message": "Invalid JSON"}
+            msg_type = msg.get("type", "")
+            if sync is None:
+                return {"type": "twin_error", "message": "Twin sync is disabled"}
+            if msg_type == "twin_replay":
+                try:
+                    start_epoch = parse_iso_epoch(msg.get("start"))
+                except ValueError:
+                    return {"type": "twin_error", "message": "twin_replay requires ISO 'start'"}
+                now = time.time()
+                if start_epoch > now or now - start_epoch > 24 * 3600:
+                    return {"type": "twin_error",
+                            "message": "Replay start must be within the past 24 hours"}
+                try:
+                    sync.start_replay(start_epoch, float(msg.get("speed") or 1.0))
+                except RuntimeError as exc:
+                    return {"type": "twin_error", "message": str(exc)}
+                return mode_payload()
+            if msg_type == "twin_live":
+                sync.go_live()
+                return mode_payload()
+            if msg_type == "twin_status":
+                return mode_payload()
+            return {"type": "twin_error", "message": f"Unknown twin message: {msg_type}"}
+
+        async def reader():
+            async for raw in websocket:
+                if isinstance(raw, bytes):
+                    continue
+                response = await handle_control(raw)
+                await websocket.send(json.dumps(response))
+
+        reader_task = asyncio.create_task(reader())
+        interval = 0.2 if control_only else 1.0 / max(rig_status["fps"], 1.0)
         last_frame = None
+        last_clock = 0.0
         try:
             while True:
-                rig = runtime.get("twin_rig")
-                if rig is None:
-                    break
-                frame = rig.get_latest_frame(camera_id)
-                if frame is not None and frame is not last_frame:
-                    await websocket.send(frame)
-                    last_frame = frame
+                if not control_only:
+                    rig = runtime.get("twin_rig")
+                    if rig is None:
+                        break
+                    frame = rig.get_latest_frame(camera_id)
+                    if frame is not None and frame is not last_frame:
+                        await websocket.send(frame)
+                        last_frame = frame
+                now = asyncio.get_running_loop().time()
+                if now - last_clock >= 1.0:
+                    last_clock = now
+                    clock_payload = mode_payload()
+                    clock_payload["type"] = "twin_clock"
+                    await websocket.send(json.dumps(clock_payload))
                 await asyncio.sleep(interval)
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
-            logger.info("Twin stream closed for %s", camera_id)
+            reader_task.cancel()
+            try:
+                await reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            logger.info("Twin %s closed for %s", "control" if control_only else "stream", camera_id)
 
     async def handler(websocket):
         if websocket.request.path == "/test":
