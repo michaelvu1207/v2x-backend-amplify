@@ -341,6 +341,8 @@ ACTION=apply TOKEN_FROM_STDIN=true EXPECTED_CURRENT_HASH="$repository_hash" \
 BACKUP_DIR="$TMP/amplify-repository-backup" \
   "$ROOT/infra/amplify/reconcile-repository.sh" \
   >"$TMP/amplify-repository-apply.txt"
+assert_contains "$TMP/amplify-repository-apply.txt" \
+  'Saved repository rollback metadata:'
 assert_contains "$MOCK_AMPLIFY_REPOSITORY_FILE" \
   'https://github.com/path2v2x/v2x-backend'
 if grep -Fq 'test-repository-token' "$MOCK_AWS_LOG"; then

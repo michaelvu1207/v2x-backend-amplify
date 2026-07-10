@@ -114,6 +114,7 @@ aws amplify get-branch \
   --branch-name "$AMPLIFY_BRANCH" \
   --output json >"$branch_backup"
 chmod 0600 "$branch_backup"
+echo "Saved repository rollback metadata: $backup_file"
 
 if [[ "$current_repository" != "$desired_repository" ]]; then
   update_input="$WORKDIR/update-app.json"
