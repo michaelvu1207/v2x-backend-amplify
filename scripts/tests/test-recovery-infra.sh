@@ -300,6 +300,11 @@ assert_contains "$MOCK_CLOUDFLARED_ARGS" 'tunnel --url http://localhost:8765'
 assert_contains "$ROOT/scripts/systemd/v2x-drive-link-health.service" 'EnvironmentFile=-/etc/v2x-drive-tunnel.env'
 assert_contains "$ROOT/infra/amplify/deploy.sh" 'RECOVERY_CONNECTED_DEPLOY_GATE'
 assert_contains "$ROOT/scripts/systemd/README.md" 'git -C /home/path/V2XCarla/v2x-backend stash push --include-untracked'
+if grep -A20 'if path == "/detections/recent"' \
+    "$ROOT/infra/aws-cli/provision-read-api.sh" | grep -Fq 'table.scan'; then
+  fail '/detections/recent still uses unordered DynamoDB Scan'
+fi
+python3 "$ROOT/infra/aws-cli/tests/test_generated_read_api.py"
 
 # Literal braces in the default perception path must survive Bash parsing, and
 # both publication gates must probe four distinct, exact camera URLs.

@@ -506,7 +506,7 @@ if [[ "${ATTACH_DDB_READ_POLICY}" == "true" ]]; then
   "Statement":[
     {
       "Effect":"Allow",
-      "Action":[ "dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan" ],
+      "Action":[ "dynamodb:GetItem", "dynamodb:Query" ],
       "Resource":[
         "arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}",
         "arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}/index/*"
@@ -1027,6 +1027,32 @@ def _get_detections_range(qs, limit, exclusive_start_key):
         },
     )
 
+def _get_detections_recent(limit, exclusive_start_key):
+    """Return the site's newest detections from the geohash/time index.
+
+    DynamoDB Scan order isn't chronological, and its Limit is applied before
+    any client-side sort. Querying the site's shared geohash partition keeps
+    pagination stable and guarantees newest-first results without reading old
+    table pages first.
+    """
+    kwargs = {
+        "IndexName": GSI_NAME,
+        "KeyConditionExpression": Key("geohash").eq(SITE_GEOHASH),
+        "Limit": limit,
+        "ScanIndexForward": False,
+    }
+    if exclusive_start_key:
+        kwargs["ExclusiveStartKey"] = exclusive_start_key
+    resp = table.query(**kwargs)
+    items = [_strip_api_fields(x) for x in (resp.get("Items", []) or [])]
+    return _resp(
+        200,
+        {
+            "items": _jsonable(items),
+            "next": _b64(resp.get("LastEvaluatedKey")),
+        },
+    )
+
 TIMELINE_MAX_PAGES = int(os.environ.get("TIMELINE_MAX_PAGES", "40"))
 
 def _get_detections_timeline(qs):
@@ -1222,21 +1248,7 @@ def handler(event, context):
         return _get_detections_range(qs, limit, exclusive_start_key)
 
     if path == "/detections/recent":
-        # NOTE: DynamoDB has no global "recent" query without a dedicated index.
-        # This is a best-effort scan for small tables; sort client-side.
-        kwargs = {"Limit": limit}
-        if exclusive_start_key:
-            kwargs["ExclusiveStartKey"] = exclusive_start_key
-        resp = table.scan(**kwargs)
-        items = [_strip_api_fields(x) for x in (resp.get("Items", []) or [])]
-        items = sorted(items, key=lambda x: (x.get("timestamp_utc") or ""), reverse=True)
-        return _resp(
-            200,
-            {
-                "items": _jsonable(items),
-                "next": _b64(resp.get("LastEvaluatedKey")),
-            },
-        )
+        return _get_detections_recent(limit, exclusive_start_key)
 
     if path in ("", "/"):
         return _resp(
