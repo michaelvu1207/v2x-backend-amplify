@@ -8,7 +8,10 @@ set -euo pipefail
 FRONTEND_CONFIG_URL="${FRONTEND_CONFIG_URL:-https://path2v2x.net/config.json}"
 PERCEPTION_LOG_FILE="${PERCEPTION_LOG_FILE:-${LOG_FILE:-/tmp/v2x-perception-cloudflared.log}}"
 PERCEPTION_PUBLIC_URL="${PERCEPTION_PUBLIC_URL:-${PUBLIC_HOSTNAME:+https://${PUBLIC_HOSTNAME}}}"
-PERCEPTION_STREAM_PATH_TEMPLATE="${PERCEPTION_STREAM_PATH_TEMPLATE:-/streams/{camera_id}.mjpg}"
+PERCEPTION_STREAM_PATH_TEMPLATE="${PERCEPTION_STREAM_PATH_TEMPLATE:-}"
+if [[ -z "$PERCEPTION_STREAM_PATH_TEMPLATE" ]]; then
+  PERCEPTION_STREAM_PATH_TEMPLATE='/streams/{camera_id}.mjpg'
+fi
 PERCEPTION_LINK_HEALTH_REPAIR="${PERCEPTION_LINK_HEALTH_REPAIR:-false}"
 AMPLIFY_RELEASE_ENABLED="${AMPLIFY_RELEASE_ENABLED:-false}"
 MIN_RELEASE_INTERVAL_SECONDS="${MIN_RELEASE_INTERVAL_SECONDS:-1800}"
@@ -26,12 +29,24 @@ if ! [[ "$MIN_RELEASE_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "MIN_RELEASE_INTERVAL_SECONDS must be a positive integer" >&2
   exit 2
 fi
-for dependency in curl jq flock; do
+for dependency in curl jq flock sed; do
   command -v "$dependency" >/dev/null 2>&1 || {
     echo "Missing dependency: $dependency" >&2
     exit 1
   }
 done
+
+render_perception_stream_path() {
+  local template="$1"
+  local camera_id="$2"
+  local rendered
+  rendered="$(printf '%s\n' "$template" | sed "s/{camera_id}/${camera_id}/")"
+  if [[ "$rendered" == "$template" || "$rendered" == *'{camera_id}'* ]]; then
+    echo "PERCEPTION_STREAM_PATH_TEMPLATE must contain exactly one literal {camera_id} marker" >&2
+    return 2
+  fi
+  printf '%s\n' "$rendered"
+}
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -76,7 +91,8 @@ if ! jq -e '
   exit 1
 fi
 for camera_id in ch1 ch2 ch3 ch4; do
-  stream_path="${PERCEPTION_STREAM_PATH_TEMPLATE/\{camera_id\}/$camera_id}"
+  stream_path="$(render_perception_stream_path \
+    "$PERCEPTION_STREAM_PATH_TEMPLATE" "$camera_id")"
   curl -fsSI --connect-timeout 10 --max-time 20 "${candidate_url}${stream_path}" >/dev/null
 done
 

@@ -16,7 +16,10 @@ PERCEPTION_LOG_FILE="${PERCEPTION_LOG_FILE:-${LOG_FILE:-/tmp/v2x-perception-clou
 DRIVE_WS_URL="${DRIVE_WS_URL:-}"
 TAILSCALE_DRIVE_WS_URL="${TAILSCALE_DRIVE_WS_URL:-wss://path-b860i-aorus-pro-ice.tail1cad6a.ts.net}"
 PERCEPTION_STREAM_BASE_URL="${PERCEPTION_STREAM_BASE_URL:-}"
-PERCEPTION_STREAM_PATH_TEMPLATE="${PERCEPTION_STREAM_PATH_TEMPLATE:-/streams/{camera_id}.mjpg}"
+PERCEPTION_STREAM_PATH_TEMPLATE="${PERCEPTION_STREAM_PATH_TEMPLATE:-}"
+if [[ -z "$PERCEPTION_STREAM_PATH_TEMPLATE" ]]; then
+  PERCEPTION_STREAM_PATH_TEMPLATE='/streams/{camera_id}.mjpg'
+fi
 BACKUP_DIR="${BACKUP_DIR:-/home/path/V2XCarla/v2x-backend-backups/amplify-runtime-config}"
 ROLLBACK_ENV_FILE="${ROLLBACK_ENV_FILE:-}"
 ROLLBACK_ENDPOINT_MODE="${ROLLBACK_ENDPOINT_MODE:-preserve-current}"
@@ -41,6 +44,7 @@ need aws
 need jq
 need sha256sum
 need curl
+need sed
 
 case "$ACTION" in
   plan|publish|rollback) ;;
@@ -89,6 +93,18 @@ normalize_http_url() {
   url="${url/#wss:/https:}"
   url="${url/#ws:/http:}"
   printf '%s\n' "${url%/}"
+}
+
+render_perception_stream_path() {
+  local template="$1"
+  local camera_id="$2"
+  local rendered
+  rendered="$(printf '%s\n' "$template" | sed "s/{camera_id}/${camera_id}/")"
+  if [[ "$rendered" == "$template" || "$rendered" == *'{camera_id}'* ]]; then
+    echo "PERCEPTION_STREAM_PATH_TEMPLATE must contain exactly one literal {camera_id} marker" >&2
+    return 3
+  fi
+  printf '%s\n' "$rendered"
 }
 
 validate_public_url() {
@@ -257,8 +273,10 @@ PY
         exit 6
       fi
       for camera_id in ch1 ch2 ch3 ch4; do
+        stream_path="$(render_perception_stream_path \
+          "$PERCEPTION_STREAM_PATH_TEMPLATE" "$camera_id")"
         curl -fsSI --connect-timeout 10 --max-time 20 \
-          "${PERCEPTION_STREAM_BASE_URL}${PERCEPTION_STREAM_PATH_TEMPLATE/\{camera_id\}/$camera_id}" \
+          "${PERCEPTION_STREAM_BASE_URL}${stream_path}" \
           >/dev/null
       done
     fi

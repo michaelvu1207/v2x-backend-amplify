@@ -92,6 +92,9 @@ JSON
   apigatewayv2:get-stages)
     printf '{"Items":[{"StageName":"$default","AutoDeploy":true}]}\n'
     ;;
+  amplify:get-branch)
+    printf '{"branch":{"environmentVariables":{}}}\n'
+    ;;
   apigatewayv2:create-route|apigatewayv2:update-route|apigatewayv2:create-integration|apigatewayv2:update-integration|apigatewayv2:create-stage|apigatewayv2:update-stage)
     printf '{}\n'
     ;;
@@ -154,7 +157,41 @@ esac
 MOCK_AWS
 chmod 0755 "$MOCK_BIN/aws"
 
+cat >"$MOCK_BIN/curl" <<'MOCK_CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$MOCK_CURL_LOG"
+output_file=""
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "-o" || "$previous" == "--output" ]]; then
+    output_file="$argument"
+    break
+  fi
+  previous="$argument"
+done
+payload=""
+case "$*" in
+  *config.json*)
+    payload='{"perceptionStreamBaseUrl":"https://perception.example.test"}'
+    ;;
+  */health*)
+    payload='{"status":"ok","ready":true,"cameras":{"ch1":{"fresh":true,"state":"streaming"},"ch2":{"fresh":true,"state":"streaming"},"ch3":{"fresh":true,"state":"streaming"},"ch4":{"fresh":true,"state":"streaming"}}}'
+    ;;
+esac
+if [[ -n "$payload" ]]; then
+  if [[ -n "$output_file" ]]; then
+    printf '%s\n' "$payload" >"$output_file"
+  else
+    printf '%s\n' "$payload"
+  fi
+fi
+MOCK_CURL
+chmod 0755 "$MOCK_BIN/curl"
+
 export MOCK_AWS_LOG MOCK_OBJECTS
+export MOCK_CURL_LOG="$TMP/curl-calls.log"
+: >"$MOCK_CURL_LOG"
 
 # Route-only planning must prove that no Lambda mutation is selected.
 PATH="$MOCK_BIN:$PATH" \
@@ -237,6 +274,35 @@ assert_contains "$MOCK_CLOUDFLARED_ARGS" 'tunnel --url http://localhost:8765'
 assert_contains "$ROOT/scripts/systemd/v2x-drive-link-health.service" 'EnvironmentFile=-/etc/v2x-drive-tunnel.env'
 assert_contains "$ROOT/infra/amplify/deploy.sh" 'RECOVERY_CONNECTED_DEPLOY_GATE'
 assert_contains "$ROOT/scripts/systemd/README.md" 'git -C /home/path/V2XCarla/v2x-backend stash push --include-untracked'
+
+# Literal braces in the default perception path must survive Bash parsing, and
+# both publication gates must probe four distinct, exact camera URLs.
+: >"$MOCK_CURL_LOG"
+env -u PERCEPTION_STREAM_PATH_TEMPLATE PATH="$MOCK_BIN:$PATH" \
+ACTION=plan UPDATE_DRIVE=false UPDATE_PERCEPTION=true \
+PERCEPTION_STREAM_BASE_URL=https://perception.example.test \
+  "$ROOT/scripts/publish-amplify-runtime-config.sh" >"$TMP/amplify-runtime-plan.txt"
+for camera_id in ch1 ch2 ch3 ch4; do
+  assert_contains "$MOCK_CURL_LOG" \
+    "https://perception.example.test/streams/${camera_id}.mjpg"
+done
+if grep -Fq '{camera_id' "$MOCK_CURL_LOG"; then
+  fail 'Amplify runtime publisher emitted an unrendered camera path marker'
+fi
+
+: >"$MOCK_CURL_LOG"
+env -u PERCEPTION_STREAM_PATH_TEMPLATE PATH="$MOCK_BIN:$PATH" \
+FRONTEND_CONFIG_URL=https://frontend.example.test/config.json \
+PERCEPTION_PUBLIC_URL=https://perception.example.test \
+  "$ROOT/scripts/check-perception-frontend-link.sh" \
+  >"$TMP/perception-link-check.txt"
+for camera_id in ch1 ch2 ch3 ch4; do
+  assert_contains "$MOCK_CURL_LOG" \
+    "https://perception.example.test/streams/${camera_id}.mjpg"
+done
+if grep -Fq '{camera_id' "$MOCK_CURL_LOG"; then
+  fail 'Perception link checker emitted an unrendered camera path marker'
+fi
 
 if command -v systemd-analyze >/dev/null 2>&1; then
   unit_dir="$TMP/units"

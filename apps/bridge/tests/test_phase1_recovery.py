@@ -28,7 +28,10 @@ class TestTeleportProtocol:
         session._active = True
         return session
 
-    def test_teleport_is_session_owned_and_resets_both_velocities(self, mock_world):
+    @pytest.mark.asyncio
+    async def test_teleport_is_session_owned_and_resets_both_velocities(
+        self, mock_world
+    ):
         first = self._active_session(mock_world, 1001)
         second = self._active_session(mock_world, 1002)
         second.vehicle.set_transform(
@@ -40,7 +43,7 @@ class TestTeleportProtocol:
         first.vehicle._velocity = MockLocation(22.0, -3.0, 1.0)
         first.vehicle._angular_velocity = MockLocation(0.0, 0.0, 8.0)
 
-        response = first.teleport(175.0, 275.0, yaw=270.0)
+        response = await first.teleport(175.0, 275.0, yaw=270.0)
 
         assert response == {
             "type": "teleported",
@@ -54,6 +57,98 @@ class TestTeleportProtocol:
         assert second.vehicle.get_transform() is second_before
         assert second.vehicle.get_transform().location == MockLocation(210.0, 310.0, 0.6)
         assert first._perception is not second._perception
+
+    @pytest.mark.asyncio
+    async def test_teleport_ack_waits_for_confirmed_carla_snapshot(self, mock_world):
+        session = self._active_session(mock_world, 1001)
+        original_set_transform = session.vehicle.set_transform
+        original_get_transform = session.vehicle.get_transform
+        pending = []
+        stale_reads = []
+
+        def defer_transform(transform):
+            pending.append(transform)
+
+        def confirm_after_stale_read():
+            if pending:
+                if not stale_reads:
+                    stale_reads.append(True)
+                else:
+                    original_set_transform(pending.pop())
+            return original_get_transform()
+
+        session.vehicle.set_transform = defer_transform
+        session.vehicle.get_transform = confirm_after_stale_read
+
+        response = await session.teleport(175.0, 275.0, yaw=90.0)
+
+        assert stale_reads == [True]
+        assert pending == []
+        assert response["pos"] == [175.0, 275.0, 0.6]
+        assert response["yaw"] == 90.0
+
+    @pytest.mark.asyncio
+    async def test_unconfirmed_teleport_gets_typed_runtime_error(
+        self, mock_world, monkeypatch
+    ):
+        from digital_twin_bridge import drive_server
+
+        session = self._active_session(mock_world, 1001)
+        session.vehicle.set_transform = lambda _transform: None
+        monkeypatch.setattr(drive_server, "TELEPORT_CONFIRM_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(
+            drive_server, "TELEPORT_CONFIRM_POLL_INTERVAL_SECONDS", 0.001
+        )
+        response = await drive_server.handle_message(
+            session,
+            {
+                "type": "teleport",
+                "request_id": "unconfirmed-runtime-test",
+                "x": 175.0,
+                "y": 275.0,
+            },
+        )
+
+        assert response == {
+            "type": "teleport_error",
+            "success": False,
+            "request_id": "unconfirmed-runtime-test",
+            "message": "CARLA did not confirm the requested Teleport pose",
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "pose_override",
+        [
+            {"yaw": 90.0},
+            {"z": 10.0},
+        ],
+    )
+    async def test_same_xy_unconfirmed_yaw_or_z_cannot_acknowledge(
+        self, mock_world, monkeypatch, pose_override
+    ):
+        from digital_twin_bridge import drive_server
+
+        session = self._active_session(mock_world, 1001)
+        current = session.vehicle.get_transform()
+        session.vehicle.set_transform = lambda _transform: None
+        monkeypatch.setattr(drive_server, "TELEPORT_CONFIRM_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(
+            drive_server, "TELEPORT_CONFIRM_POLL_INTERVAL_SECONDS", 0.001
+        )
+        message = {
+            "type": "teleport",
+            "request_id": "same-xy-unconfirmed",
+            "x": current.location.x,
+            "y": current.location.y,
+            **pose_override,
+        }
+
+        response = await drive_server.handle_message(session, message)
+
+        assert response["type"] == "teleport_error"
+        assert response["request_id"] == "same-xy-unconfirmed"
+        assert response["message"] == "CARLA did not confirm the requested Teleport pose"
 
     @pytest.mark.asyncio
     async def test_invalid_values_get_a_typed_teleport_error(self, mock_world):

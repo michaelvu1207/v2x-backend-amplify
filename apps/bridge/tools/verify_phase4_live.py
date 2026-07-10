@@ -99,12 +99,68 @@ async def receive_binary_frame(
             return digest
 
 
+def world_actor_inventory(world):
+    """Snapshot actor identity fields needed to distinguish ownership."""
+    inventory = {}
+    for actor in world.get_actors():
+        actor_id = getattr(actor, "id", None)
+        if not isinstance(actor_id, int):
+            continue
+        attributes = getattr(actor, "attributes", None) or {}
+        inventory[int(actor_id)] = {
+            "type_id": str(getattr(actor, "type_id", "")),
+            "role_name": str(attributes.get("role_name", "")),
+        }
+    return inventory
+
+
+def synchronize_world(world, timeout):
+    """Wait for a real CARLA snapshot before trusting actor enumeration.
+
+    RR/CARLA 0.10 can return frame zero and an empty actor registry to a newly
+    connected client until that client consumes its first world tick.
+    """
+    try:
+        snapshot = world.wait_for_tick(float(timeout))
+    except Exception as exc:
+        raise VerificationError("timed out synchronizing the CARLA world") from exc
+    frame = getattr(snapshot, "frame", None)
+    if isinstance(frame, bool) or not isinstance(frame, int) or frame <= 0:
+        raise VerificationError("CARLA world synchronization returned no real frame")
+    return frame
+
+
 def world_actor_ids(world):
     """Snapshot every current CARLA actor ID, not only declared ownership."""
+    return set(world_actor_inventory(world))
+
+
+def is_expected_non_session_actor(actor_identity):
+    """Return whether an actor is owned by the map or live-twin runtime.
+
+    The RR world can populate its spectator, traffic-control actors, and fixed
+    twin camera rig after the first ``get_actors()`` response. Live twin
+    detections may also appear or expire while a Drive session is running.
+    These actors are intentionally outside every DriveSession manifest.
+    """
+    type_id = actor_identity.get("type_id", "")
+    role_name = actor_identity.get("role_name", "")
+    if type_id == "spectator" or type_id.startswith("traffic."):
+        return True
+    if role_name == "twin_rig" and type_id.startswith("sensor."):
+        return True
+    if role_name == "twin_object" and type_id.startswith(("vehicle.", "walker.")):
+        return True
+    return False
+
+
+def session_candidate_actor_ids(actor_ids, actor_inventory):
+    """Filter map/live-twin churn from a post-baseline actor delta."""
     return {
-        int(actor.id)
-        for actor in world.get_actors()
-        if isinstance(getattr(actor, "id", None), int)
+        actor_id
+        for actor_id in actor_ids
+        if actor_id not in actor_inventory
+        or not is_expected_non_session_actor(actor_inventory[actor_id])
     }
 
 
@@ -166,15 +222,31 @@ def validate_session_actor_manifest(
     return vehicle_id, owned_ids, sensor_ids, scene_ids
 
 
-def validate_actor_delta(created_actor_ids, declared_actor_ids):
-    """Require the complete post-baseline CARLA delta to be declared."""
-    undeclared = set(created_actor_ids) - set(declared_actor_ids)
+def validate_actor_delta(
+    created_actor_ids,
+    declared_actor_ids,
+    actor_inventory=None,
+):
+    """Require every Drive-owned post-baseline actor to be declared.
+
+    Map actors and server-owned live-twin actors are excluded only when their
+    type/role pair proves that ownership. All vehicles, sensors, and props that
+    could belong to a Drive session remain subject to the exact manifest gate.
+    """
+    created_actor_ids = set(created_actor_ids)
+    declared_actor_ids = set(declared_actor_ids)
+    actor_inventory = actor_inventory or {}
+    session_candidates = session_candidate_actor_ids(
+        created_actor_ids, actor_inventory
+    )
+    undeclared = session_candidates - declared_actor_ids
     missing_from_world = set(declared_actor_ids) - set(created_actor_ids)
     if undeclared or missing_from_world:
         raise VerificationError(
             "CARLA actor delta does not exactly match session manifests: "
             f"undeclared={sorted(undeclared)} missing={sorted(missing_from_world)}"
         )
+    return created_actor_ids - session_candidates
 
 
 def replay_clock_epoch(value):
@@ -219,6 +291,26 @@ def actor_snapshot(world, actor_ids):
 
 def planar_distance(left, right):
     return math.hypot(left[0] - right[0], left[1] - right[1])
+
+
+def teleport_pose_errors(position, yaw, target_position, target_yaw):
+    """Return planar/yaw errors while rejecting malformed protocol poses."""
+    try:
+        values = [
+            float(position[0]),
+            float(position[1]),
+            float(yaw),
+            float(target_position[0]),
+            float(target_position[1]),
+            float(target_yaw),
+        ]
+    except (IndexError, TypeError, ValueError) as exc:
+        raise VerificationError("Teleport response has no valid pose") from exc
+    if not all(math.isfinite(value) for value in values):
+        raise VerificationError("Teleport response has no valid pose")
+    position_error = math.hypot(values[0] - values[3], values[1] - values[4])
+    yaw_error = abs(((values[2] - values[5] + 180.0) % 360.0) - 180.0)
+    return position_error, yaw_error
 
 
 def validate_isolated_ego_roles(roles):
@@ -379,18 +471,23 @@ async def verify_twin(args):
 
 
 async def verify_drive_sessions(args, world, carla_map):
-    baseline_actor_ids = world_actor_ids(world)
+    baseline_snapshot_frame = synchronize_world(world, args.timeout)
+    baseline_actor_inventory = world_actor_inventory(world)
+    baseline_actor_ids = set(baseline_actor_inventory)
     evidence = {
         "binary_frames": 0,
         "json_types": [],
         "started_actor_ids": [],
         "started_owned_actor_ids": [],
         "session_actor_manifests": [],
+        "actor_snapshot_frames": [baseline_snapshot_frame],
         "baseline_actor_ids": sorted(baseline_actor_ids),
+        "ignored_non_session_actor_ids": [],
     }
     sockets = []
     started = []
     observed_created_actor_ids = set()
+    ignored_non_session_actor_ids = set()
     try:
         for _ in range(2):
             socket = await websockets.connect(
@@ -431,7 +528,11 @@ async def verify_drive_sessions(args, world, carla_map):
             )
             if response.get("type") != "session_ready":
                 raise VerificationError(f"Drive session failed to start: {response}")
-            current_actor_ids = world_actor_ids(world)
+            evidence["actor_snapshot_frames"].append(
+                synchronize_world(world, args.timeout)
+            )
+            current_actor_inventory = world_actor_inventory(world)
+            current_actor_ids = set(current_actor_inventory)
             observed_created_actor_ids.update(current_actor_ids - baseline_actor_ids)
             prior_owned = set().union(
                 *(previous_owned for _, _, previous_owned in started)
@@ -442,9 +543,12 @@ async def verify_drive_sessions(args, world, carla_map):
                 current_actor_ids=current_actor_ids,
                 prior_owned_actor_ids=prior_owned,
             )
-            validate_actor_delta(
-                current_actor_ids - baseline_actor_ids,
-                prior_owned | owned_ids,
+            ignored_non_session_actor_ids.update(
+                validate_actor_delta(
+                    current_actor_ids - baseline_actor_ids,
+                    prior_owned | owned_ids,
+                    current_actor_inventory,
+                )
             )
             started.append((socket, actor_id, owned_ids))
             evidence["started_actor_ids"].append(actor_id)
@@ -456,7 +560,11 @@ async def verify_drive_sessions(args, world, carla_map):
                 "owned_actor_ids": sorted(owned_ids),
             })
 
-        post_start_actor_ids = world_actor_ids(world)
+        evidence["actor_snapshot_frames"].append(
+            synchronize_world(world, args.timeout)
+        )
+        post_start_actor_inventory = world_actor_inventory(world)
+        post_start_actor_ids = set(post_start_actor_inventory)
         created_actor_ids = post_start_actor_ids - baseline_actor_ids
         observed_created_actor_ids.update(created_actor_ids)
         declared_actor_ids = set().union(
@@ -464,7 +572,16 @@ async def verify_drive_sessions(args, world, carla_map):
         )
         evidence["post_start_actor_ids"] = sorted(post_start_actor_ids)
         evidence["created_actor_ids"] = sorted(created_actor_ids)
-        validate_actor_delta(created_actor_ids, declared_actor_ids)
+        ignored_non_session_actor_ids.update(
+            validate_actor_delta(
+                created_actor_ids,
+                declared_actor_ids,
+                post_start_actor_inventory,
+            )
+        )
+        evidence["ignored_non_session_actor_ids"] = sorted(
+            ignored_non_session_actor_ids
+        )
 
         actor_ids = [actor_id for _, actor_id, _ in started]
         before = actor_snapshot(world, actor_ids)
@@ -502,21 +619,91 @@ async def verify_drive_sessions(args, world, carla_map):
             raise VerificationError("Teleport acknowledgement correlation mismatch")
 
         await asyncio.sleep(args.settle_seconds)
-        after = actor_snapshot(world, actor_ids)
-        evidence["after"] = after
-        if set(after) != set(actor_ids):
-            raise VerificationError("session actor disappeared during Teleport")
         ack_pos = acknowledgement.get("pos")
         if not isinstance(ack_pos, list) or len(ack_pos) != 3:
             raise VerificationError("Teleport acknowledgement has no valid position")
-        a_error = planar_distance(after[actor_ids[0]]["location"], ack_pos)
+        target_position = [float(target.location.x), float(target.location.y)]
+        target_yaw = float(target.rotation.yaw)
+        ack_target_error, ack_target_yaw_error = teleport_pose_errors(
+            ack_pos,
+            acknowledgement.get("yaw"),
+            target_position,
+            target_yaw,
+        )
+        evidence["teleport_ack_target_error_m"] = round(ack_target_error, 3)
+        evidence["teleport_ack_target_yaw_error_deg"] = round(
+            ack_target_yaw_error, 3
+        )
+        if (
+            ack_target_error > args.position_tolerance_m
+            or ack_target_yaw_error > args.yaw_tolerance_deg
+        ):
+            raise VerificationError(
+                "Teleport acknowledgement does not match the requested target"
+            )
+
+        # A separate RR/CARLA client can briefly observe a pre-Teleport actor
+        # snapshot even after the bridge has acknowledged set_transform().
+        # Consume bounded world ticks until this client's view converges.
+        deadline = time.monotonic() + args.timeout
+        after = {}
+        a_error = math.inf
+        a_yaw_error = math.inf
+        poll_count = 0
+        last_frame = None
+        while time.monotonic() < deadline:
+            remaining = max(0.1, deadline - time.monotonic())
+            last_frame = synchronize_world(world, min(1.0, remaining))
+            poll_count += 1
+            after = actor_snapshot(world, actor_ids)
+            if set(after) != set(actor_ids):
+                continue
+            a_error, a_yaw_error = teleport_pose_errors(
+                after[actor_ids[0]]["location"],
+                after[actor_ids[0]]["yaw"],
+                target_position,
+                target_yaw,
+            )
+            if (
+                a_error <= args.position_tolerance_m
+                and a_yaw_error <= args.yaw_tolerance_deg
+            ):
+                break
+        evidence["post_teleport_poll_count"] = poll_count
+        evidence["actor_snapshot_frames"].append(last_frame)
+        evidence["after"] = after
+        if set(after) != set(actor_ids):
+            raise VerificationError("session actor disappeared during Teleport")
+        ack_observed_error, ack_observed_yaw_error = teleport_pose_errors(
+            after[actor_ids[0]]["location"],
+            after[actor_ids[0]]["yaw"],
+            ack_pos,
+            acknowledgement.get("yaw"),
+        )
         b_displacement = planar_distance(
             after[actor_ids[1]]["location"], before[actor_ids[1]]["location"]
         )
         evidence["teleport_position_error_m"] = round(a_error, 3)
+        evidence["teleport_yaw_error_deg"] = round(a_yaw_error, 3)
+        evidence["teleport_ack_observed_error_m"] = round(
+            ack_observed_error, 3
+        )
+        evidence["teleport_ack_observed_yaw_error_deg"] = round(
+            ack_observed_yaw_error, 3
+        )
         evidence["isolated_session_displacement_m"] = round(b_displacement, 3)
-        if a_error > args.position_tolerance_m:
-            raise VerificationError(f"Teleported ego position error is {a_error:.3f} m")
+        if (
+            a_error > args.position_tolerance_m
+            or a_yaw_error > args.yaw_tolerance_deg
+            or ack_observed_error > args.position_tolerance_m
+            or ack_observed_yaw_error > args.yaw_tolerance_deg
+        ):
+            raise VerificationError(
+                f"Teleported ego pose did not converge: position={a_error:.3f}m "
+                f"yaw={a_yaw_error:.3f}deg "
+                f"ack={ack_pos[:2]} observed={after[actor_ids[0]]['location'][:2]} "
+                f"after {poll_count} world ticks"
+            )
         if b_displacement > args.isolation_tolerance_m:
             raise VerificationError(
                 f"other session moved {b_displacement:.3f} m during Teleport"
@@ -550,16 +737,27 @@ async def verify_drive_sessions(args, world, carla_map):
             except Exception:
                 pass
 
-        observed_created_actor_ids.update(world_actor_ids(world) - baseline_actor_ids)
+        final_actor_inventory = world_actor_inventory(world)
+        observed_created_actor_ids.update(
+            set(final_actor_inventory) - baseline_actor_ids
+        )
         if observed_created_actor_ids:
             deadline = time.monotonic() + args.cleanup_timeout
-            while (
-                time.monotonic() < deadline
-                and observed_created_actor_ids & world_actor_ids(world)
-            ):
+            remaining_ids = session_candidate_actor_ids(
+                observed_created_actor_ids & set(final_actor_inventory),
+                final_actor_inventory,
+            )
+            while time.monotonic() < deadline and remaining_ids:
                 await asyncio.sleep(0.2)
-            final_actor_ids = world_actor_ids(world)
-            remaining_ids = observed_created_actor_ids & final_actor_ids
+                final_actor_inventory = world_actor_inventory(world)
+                observed_created_actor_ids.update(
+                    set(final_actor_inventory) - baseline_actor_ids
+                )
+                remaining_ids = session_candidate_actor_ids(
+                    observed_created_actor_ids & set(final_actor_inventory),
+                    final_actor_inventory,
+                )
+            final_actor_ids = set(final_actor_inventory)
             evidence["final_actor_ids"] = sorted(final_actor_ids)
             evidence["remaining_created_actor_ids"] = sorted(remaining_ids)
             if remaining_ids:
@@ -605,6 +803,7 @@ def build_parser():
     parser.add_argument("--cleanup-timeout", type=float, default=15.0)
     parser.add_argument("--settle-seconds", type=float, default=1.0)
     parser.add_argument("--position-tolerance-m", type=float, default=2.0)
+    parser.add_argument("--yaw-tolerance-deg", type=float, default=3.0)
     parser.add_argument("--isolation-tolerance-m", type=float, default=3.0)
     parser.add_argument("--replay-age-seconds", type=float, default=60.0)
     parser.add_argument("--max-message-bytes", type=int, default=8 * 1024 * 1024)

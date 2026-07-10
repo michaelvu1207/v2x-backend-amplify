@@ -9,6 +9,9 @@ from tools.verify_phase4_live import (
     receive_binary_frame,
     receive_json,
     replay_clock_epoch,
+    session_candidate_actor_ids,
+    synchronize_world,
+    teleport_pose_errors,
     validate_actor_delta,
     validate_isolated_ego_roles,
     validate_session_actor_manifest,
@@ -168,3 +171,94 @@ def test_full_actor_delta_rejects_unmanifested_or_nonexistent_actor():
         validate_actor_delta({10, 11, 12, 99}, {10, 11, 12})
     with pytest.raises(VerificationError, match=r"missing=\[12\]"):
         validate_actor_delta({10, 11}, {10, 11, 12})
+
+
+def test_actor_delta_allows_only_known_map_and_live_twin_actors():
+    inventory = {
+        15: {"type_id": "spectator", "role_name": ""},
+        18: {"type_id": "traffic.traffic_light", "role_name": ""},
+        33: {"type_id": "sensor.camera.rgb", "role_name": "twin_rig"},
+        40: {"type_id": "walker.pedestrian.0001", "role_name": "twin_object"},
+        41: {"type_id": "vehicle.tesla.model3", "role_name": "ego_vehicle_a"},
+        42: {"type_id": "sensor.camera.rgb", "role_name": ""},
+    }
+
+    ignored = validate_actor_delta(set(inventory), {41, 42}, inventory)
+
+    assert ignored == {15, 18, 33, 40}
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"type_id": "sensor.camera.rgb", "role_name": ""},
+        {"type_id": "static.prop.trafficcone01", "role_name": ""},
+        {"type_id": "vehicle.tesla.model3", "role_name": "autopilot"},
+        {"type_id": "vehicle.tesla.model3", "role_name": "twin_rig"},
+        {"type_id": "sensor.camera.rgb", "role_name": "twin_object"},
+    ],
+)
+def test_actor_delta_still_rejects_possible_drive_session_leaks(identity):
+    with pytest.raises(VerificationError, match=r"undeclared=\[99\]"):
+        validate_actor_delta({99}, set(), {99: identity})
+
+
+def test_cleanup_candidates_exclude_map_and_live_twin_churn():
+    inventory = {
+        15: {"type_id": "spectator", "role_name": ""},
+        33: {"type_id": "sensor.camera.rgb", "role_name": "twin_rig"},
+        40: {"type_id": "vehicle.audi.tt", "role_name": "twin_object"},
+        41: {"type_id": "vehicle.tesla.model3", "role_name": "ego_vehicle_a"},
+        42: {"type_id": "static.prop.trafficcone01", "role_name": ""},
+    }
+
+    assert session_candidate_actor_ids(set(inventory), inventory) == {41, 42}
+
+
+def test_world_synchronization_requires_a_real_nonzero_snapshot():
+    class Snapshot:
+        frame = 1234
+
+    class World:
+        def __init__(self):
+            self.timeout = None
+
+        def wait_for_tick(self, timeout):
+            self.timeout = timeout
+            return Snapshot()
+
+    world = World()
+    assert synchronize_world(world, 2.5) == 1234
+    assert world.timeout == 2.5
+
+
+@pytest.mark.parametrize("snapshot", [None, object()])
+def test_world_synchronization_rejects_missing_or_frame_zero_snapshot(snapshot):
+    class World:
+        def wait_for_tick(self, _timeout):
+            return snapshot
+
+    with pytest.raises(VerificationError, match="no real frame"):
+        synchronize_world(World(), 1.0)
+
+
+def test_teleport_pose_errors_compare_requested_target_and_wrap_yaw():
+    position_error, yaw_error = teleport_pose_errors(
+        [3.0, 4.0, 99.0], 179.0, [0.0, 0.0], -179.0
+    )
+
+    assert position_error == pytest.approx(5.0)
+    assert yaw_error == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    ("position", "yaw"),
+    [
+        ([], 0.0),
+        ([0.0, 0.0], None),
+        ([float("nan"), 0.0], 0.0),
+    ],
+)
+def test_teleport_pose_errors_reject_malformed_protocol_values(position, yaw):
+    with pytest.raises(VerificationError, match="no valid pose"):
+        teleport_pose_errors(position, yaw, [0.0, 0.0], 0.0)

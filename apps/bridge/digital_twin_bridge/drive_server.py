@@ -47,6 +47,10 @@ TELEPORT_MAX_Z_M = 500.0
 TELEPORT_MAX_ROAD_Z_OFFSET_M = 50.0
 TELEPORT_MAX_ABS_YAW_DEG = 360.0
 TELEPORT_REQUEST_ID_MAX_LENGTH = 128
+TELEPORT_CONFIRM_TIMEOUT_SECONDS = 2.0
+TELEPORT_CONFIRM_TOLERANCE_M = 2.0
+TELEPORT_CONFIRM_POLL_INTERVAL_SECONDS = 0.05
+TELEPORT_CONFIRM_YAW_TOLERANCE_DEG = 3.0
 
 # Historical range reads are isolated from the CARLA event loop.  Limit
 # concurrent workers globally per event loop; a timed-out worker keeps its slot
@@ -1085,7 +1089,7 @@ class DriveSession:
         ):
             raise ValueError("teleport coordinates are outside the active map envelope")
 
-    def teleport(self, x, y, z=None, yaw=None) -> dict:
+    async def teleport(self, x, y, z=None, yaw=None) -> dict:
         """Move only this session's ego to a validated active-map coordinate."""
         if not self._active or self.vehicle is None:
             raise RuntimeError("No active session")
@@ -1150,7 +1154,51 @@ class DriveSession:
         if set_angular is not None:
             set_angular(carla.Vector3D(0.0, 0.0, 0.0))
 
+        # RR/CARLA 0.10 can return the actor's pre-mutation transform until the
+        # bridge's synchronous 20 Hz tick loop advances. Yield to that loop and
+        # confirm the mutation without calling world.tick()/wait_for_tick from
+        # this handler, which would compete with the single CARLA tick owner.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TELEPORT_CONFIRM_TIMEOUT_SECONDS
+        await asyncio.sleep(
+            min(
+                TELEPORT_CONFIRM_POLL_INTERVAL_SECONDS,
+                TELEPORT_CONFIRM_TIMEOUT_SECONDS,
+            )
+        )
         actual = self.vehicle.get_transform()
+        confirmation_error = math.inf
+        confirmation_yaw_error = math.inf
+        while True:
+            confirmation_error = math.sqrt(
+                (float(actual.location.x) - x_value) ** 2
+                + (float(actual.location.y) - y_value) ** 2
+                + (float(actual.location.z) - z_value) ** 2
+            )
+            confirmation_yaw_error = abs(
+                ((float(actual.rotation.yaw) - yaw_value + 180.0) % 360.0)
+                - 180.0
+            )
+            if (
+                confirmation_error <= TELEPORT_CONFIRM_TOLERANCE_M
+                and confirmation_yaw_error
+                <= TELEPORT_CONFIRM_YAW_TOLERANCE_DEG
+            ):
+                break
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(
+                min(TELEPORT_CONFIRM_POLL_INTERVAL_SECONDS, remaining)
+            )
+            actual = self.vehicle.get_transform()
+        if (
+            confirmation_error > TELEPORT_CONFIRM_TOLERANCE_M
+            or confirmation_yaw_error > TELEPORT_CONFIRM_YAW_TOLERANCE_DEG
+        ):
+            raise RuntimeError(
+                "CARLA did not confirm the requested Teleport pose"
+            )
         logger.info(
             "Session %s teleported ego %s to (%.1f, %.1f, %.1f)",
             self._ego_role,
@@ -2365,7 +2413,7 @@ async def handle_message(session: DriveSession, msg: dict, map_controller=None) 
                     "message": str(exc),
                 }
             try:
-                response = session.teleport(
+                response = await session.teleport(
                     x=msg.get("x"),
                     y=msg.get("y"),
                     z=msg.get("z"),

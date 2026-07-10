@@ -11,7 +11,7 @@ Treat this file as an operating procedure, not proof of current state. Re-run th
 
 - Work locally when already on `path-B860I-AORUS-PRO-ICE`; do not SSH back into the same host.
 - From another host, use the configured SSH/Tailscale connection to `path@100.72.252.40`. Do not embed credentials in commands or source.
-- Make source changes only in a clean Codex worktree. Use `/home/path/V2XCarla/v2x-backend-dev` as the clean reference.
+- Make source changes only in a clean Codex worktree. Treat `/home/path/V2XCarla/v2x-backend-dev` as a reference candidate, not as proof that it is clean; verify its status and fail the deployment gate if it is dirty.
 - Do not overwrite `/home/path/V2XCarla/v2x-backend` until a controlled deployment gate. It may run active services and contain live-only work.
 - Preserve `/home/path/V2XCarla/v2x-backend-backups/` and take a fresh rollback snapshot before deployment.
 - Never use the retired `carla-rfs`/CARLA 0.9.16 restart recipe. The accepted simulator is RR/CARLA 0.10.
@@ -56,11 +56,17 @@ hostname
 date -u +%Y-%m-%dT%H:%M:%SZ
 git -C /home/path/V2XCarla/v2x-backend status --short --branch
 git -C /home/path/V2XCarla/v2x-backend-dev status --short --branch
+test -z "$(git -C /home/path/V2XCarla/v2x-backend-dev status --porcelain=v1)" || {
+  echo "Clean-reference candidate is dirty; stop and reconcile it." >&2
+  exit 1
+}
 docker ps -a --filter name=carla-rr-maps --no-trunc
 docker inspect carla-rr-maps --format \
   'image={{.Config.Image}} runtime={{.HostConfig.Runtime}} network={{.HostConfig.NetworkMode}} restart={{.HostConfig.RestartPolicy.Name}} ports={{json .HostConfig.PortBindings}} cmd={{json .Config.Cmd}}'
-ss -ltnp | awk 'NR==1 || /:(2000|8765|5173|8090)( |$)/'
+ss -ltnp | awk 'NR==1 || /:(2000|2001|2002|8765|5173|8090)( |$)/'
+ps -eo pid=,ppid=,lstart=,args= | awk '/[c]loudflared/'
 systemctl show \
+  v2x-carla-rr.service \
   v2x-drive.service \
   v2x-perception.service \
   v2x-web.service \
@@ -69,13 +75,22 @@ systemctl show \
   v2x-drive-link-health.timer \
   v2x-perception-link-health.timer \
   v2x-hourly-drive-restart.timer \
-  --property=Id,ActiveState,SubState,FragmentPath,ExecMainStartTimestamp,NextElapseUSecRealtime
+  --property=Id,ActiveState,SubState,UnitFileState,FragmentPath,MainPID,ExecMainStartTimestamp,NextElapseUSecRealtime
+for unit in \
+  v2x-carla-rr.service v2x-drive.service v2x-perception.service \
+  v2x-web.service v2x-cloudflared-drive.service \
+  v2x-cloudflared-perception.service v2x-drive-link-health.timer \
+  v2x-perception-link-health.timer v2x-hourly-drive-restart.timer; do
+  printf '%s=' "$unit"
+  systemctl is-enabled "$unit" 2>&1 || true
+done
 ```
 
 Inspect installed definitions before trusting tracked units:
 
 ```bash
 systemctl cat \
+  v2x-carla-rr.service \
   v2x-drive.service \
   v2x-perception.service \
   v2x-web.service \
@@ -87,6 +102,43 @@ systemctl cat \
   v2x-perception-link-health.timer \
   v2x-hourly-drive-restart.service \
   v2x-hourly-drive-restart.timer
+```
+
+Print only allowlisted, non-secret safety gates. Calculate the installed
+last-declaration-wins values, then compare active services with their actual
+process environments; a mismatch means the process has not consumed the new
+configuration. Never dump a complete unit or process environment.
+
+```bash
+gate_keys='^(ALLOW_CARLA_CONFIG_DRIFT|ALLOW_CARLA_CREATE|ALLOW_CARLA_RECREATE|AMPLIFY_RELEASE_ENABLED|DRIVE_CONFIG_REQUIRED|DRIVE_LINK_HEALTH_REPAIR|DRIVE_TUNNEL_MODE|DRIVE_WS_INSECURE_SSL|PERCEPTION_LINK_HEALTH_REPAIR|PUBLISH_DRIVE_FRONTEND_CONFIG|PUBLISH_DRIVE_FRONTEND_CONFIG_REQUIRED|SKIP_RESTART_IF_ACTIVE_SESSION|V2X_PERCEPTION_UPLOAD)$'
+show_declared_gates() {
+  unit="$1"; shift
+  {
+    systemctl show "$unit" --property=Environment --value | tr ' ' '\n'
+    for file in "$@"; do
+      sudo awk -F= -v keys="$gate_keys" '$1 ~ keys {print}' "$file" 2>/dev/null || true
+    done
+  } | awk -F= -v keys="$gate_keys" '$1 ~ keys {value[$1]=$2} END {for (key in value) print key "=" value[key]}' | sort
+}
+show_declared_gates v2x-carla-rr.service /etc/v2x-carla-rr.env
+show_declared_gates v2x-perception.service /etc/v2x-perception.env
+show_declared_gates v2x-cloudflared-drive.service /etc/v2x-drive-tunnel.env
+show_declared_gates v2x-cloudflared-perception.service /etc/v2x-perception-tunnel.env
+show_declared_gates v2x-drive-link-health.service /etc/v2x-drive-tunnel.env /etc/v2x-drive-link-health.env
+show_declared_gates v2x-perception-link-health.service /etc/v2x-perception-tunnel.env /etc/v2x-perception-link-health.env
+show_declared_gates v2x-hourly-drive-restart.service /etc/v2x-drive-restart.env
+
+for unit in v2x-carla-rr.service v2x-perception.service \
+  v2x-cloudflared-drive.service v2x-cloudflared-perception.service; do
+  pid="$(systemctl show "$unit" --property=MainPID --value)"
+  printf '[%s pid=%s effective]\n' "$unit" "$pid"
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    sudo sh -c 'tr "\0" "\n" < "/proc/$1/environ"' sh "$pid" \
+      | awk -F= -v keys="$gate_keys" '$1 ~ keys {print}' | sort
+  else
+    echo inactive
+  fi
+done
 ```
 
 ## Mental model
@@ -102,6 +154,14 @@ Keep these layers separate:
 7. Public runtime configuration and API routes.
 
 A healthy CARLA container does not prove a healthy bridge, tunnel, frontend, or perception pipeline.
+
+## Computer Use companion
+
+- Use CLI/API probes for infrastructure facts and Computer Use for visible `/drive`, `/live`, and `/timeline` behavior, screenshots, browser console, network requests, and WebSocket frames. Hard-refresh after each state-changing action before recording evidence.
+- If `node_repl` with `@oai/sky` is unavailable on the Path PC task, continue the stable companion task on `remote-ssh-codex-managed:simforgelaptop` with `send_message_to_thread`; create a new task only when explicitly requested. Do not ask the user to operate the browser.
+- Include the public URL, expected deployed commit/config version, exact page flows, read-only or mutation boundary, cleanup requirement, and a request to debug within scope until each acceptance check works. Require `node_repl`/`@oai/sky`, refreshed screenshots, console and network evidence, and explicit cleanup of any Drive session.
+- Immediately create an `automation_update` heartbeat that calls `read_thread` every minute, reports terminal completion, and disables itself after success/failure. If that runtime is unavailable, dedicate a collaboration agent to poll the task every 30 seconds with bounded waits. Preserve the task when the selected account is usage-limited and resume it when capacity returns.
+- Record the companion task ID and heartbeat ID in the phase evidence. Stop/archive the heartbeat only after consuming the final result; do not infer completion from silence.
 
 ## Drive diagnosis order
 
@@ -158,6 +218,7 @@ tail -n 200 /tmp/v2x-cloudflared.log
 - Never hardcode a newly observed `*.trycloudflare.com` URL in source.
 - Never roll back to a saved Quick-Tunnel URL after that process has stopped; it is dead. Preserve the old tunnel during a blue/green cutover, publish the newly proven endpoint, verify public convergence, and only then stop the old process.
 - Treat Tailscale and Cloudflare as separate transports. Validate the endpoint the browser actually selected.
+- Treat an enabled-but-inactive `v2x-cloudflared-perception.service` and a `cloudflared` process with PPID 1 as separate facts. `enable` does not adopt that unmanaged process; starting the unit creates a second tunnel. Record both PID/PPID/command/URL tuples, keep the PPID-1 tunnel alive during blue/green validation, and stop only the exact old PID after public convergence.
 
 Read-only checks:
 
@@ -168,7 +229,46 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
   https://w0j9m7dgpg.execute-api.us-west-1.amazonaws.com/drive-config
 ```
 
-An HTTP `426` from the tunnel root can be expected for a reachable WebSocket-only origin. Require a real WebSocket `101`/handshake for acceptance.
+Accept `/drive-config` only when it returns HTTP `200`; `version` is a positive,
+nondecreasing integer; `updatedAt`/`expiresAt` are fresh and within the browser's
+24-hour TTL bound; and the selected WebSocket URL equals the endpoint of the
+still-running tunnel. For a Quick Tunnel, compare it directly:
+
+```bash
+(
+body="$(mktemp)"; trap 'rm -f "$body"' EXIT
+code="$(curl -sS -o "$body" -w '%{http_code}' \
+  https://w0j9m7dgpg.execute-api.us-west-1.amazonaws.com/drive-config)"
+test "$code" = 200
+: "${PREVIOUS_DRIVE_CONFIG_VERSION:=0}"
+jq -e --argjson previous "$PREVIOUS_DRIVE_CONFIG_VERSION" \
+  --argjson now "$(date -u +%s)" '
+  .version as $v
+  | (.updatedAt | fromdateiso8601) as $updated
+  | (.expiresAt | fromdateiso8601) as $expires
+  | ($v | type == "number") and ($v >= 1) and ($v == ($v | floor))
+    and ($v >= $previous) and ($updated <= ($now + 300))
+    and ($expires > $now) and (($expires - $updated) > 0)
+    and (($expires - $updated) <= 86400)' "$body"
+pgrep -af 'cloudflared.*(localhost|127\.0\.0\.1):8765'
+active_drive_ws="$(grep -Eo 'https://[A-Za-z0-9-]+\.trycloudflare\.com' \
+  /tmp/v2x-cloudflared.log | tail -n 1 | sed 's#^https:#wss:#')"
+published_drive_ws="$(jq -er '.cloudflareDriveWsUrl' "$body")"
+test "$published_drive_ws" = "$active_drive_ws"
+DRIVE_WS_URL="$published_drive_ws" /home/path/V2XCarla/carla-venv-310/bin/python - <<'PY'
+import asyncio, os, websockets
+async def main():
+    async with websockets.connect(os.environ["DRIVE_WS_URL"], open_timeout=10):
+        print("PUBLIC_WS_OK")
+asyncio.run(main())
+PY
+)
+```
+
+Also require Computer Use network evidence that `/drive-config` returned that
+version and `/drive` opened its WebSocket against the same endpoint after a
+hard refresh. An HTTP `426` from the tunnel root can be expected for a reachable
+WebSocket-only origin; require a real WebSocket `101`/handshake for acceptance.
 
 ## Perception diagnosis
 
@@ -228,11 +328,22 @@ each feed, and rejects query-bearing endpoint input:
   http://127.0.0.1:8090
 ```
 
-For a bounded Drive/twin/replay regression, run the tracked verifier observationally first. Use `--apply` only after it reports zero active sessions; the apply mode creates two isolated sessions, verifies correlated Teleport, exercises replay, restores live mode, and cleans up owned actors in `finally`:
+For a bounded Drive/twin/replay regression, run the tracked verifier
+observationally first. Never pass `--apply` during planning, read-only diagnosis,
+or observational validation: it mutates simulator state by creating sessions
+and actors. Omit it entirely from read-only evidence.
 
 ```bash
 /home/path/V2XCarla/carla-venv-310/bin/python \
   /home/path/V2XCarla/v2x-backend/apps/bridge/tools/verify_phase4_live.py
+```
+
+Only inside an authorized mutation window, after the observational command
+reports zero active sessions, run apply mode. It creates two isolated sessions,
+verifies correlated Teleport, exercises replay, restores live mode, and cleans
+up owned actors in `finally`:
+
+```bash
 /home/path/V2XCarla/carla-venv-310/bin/python \
   /home/path/V2XCarla/v2x-backend/apps/bridge/tools/verify_phase4_live.py --apply
 ```
