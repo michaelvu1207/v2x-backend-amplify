@@ -118,10 +118,11 @@ chmod 0600 "$branch_backup"
 if [[ "$current_repository" != "$desired_repository" ]]; then
   update_input="$WORKDIR/update-app.json"
   jq -n \
-    --arg AppId "$AMPLIFY_APP_ID" \
-    --arg Repository "$desired_repository" \
-    --arg AccessToken "$token" \
-    '{$AppId, $Repository, $AccessToken}' >"$update_input"
+    --arg appId "$AMPLIFY_APP_ID" \
+    --arg repository "$desired_repository" \
+    --arg accessToken "$token" \
+    '{appId: $appId, repository: $repository, accessToken: $accessToken}' \
+    >"$update_input"
   chmod 0600 "$update_input"
   token=""
   aws amplify update-app --cli-input-json "file://${update_input}" >/dev/null

@@ -95,6 +95,26 @@ JSON
   amplify:get-branch)
     printf '{"branch":{"environmentVariables":{}}}\n'
     ;;
+  amplify:get-app)
+    repository="$(cat "$MOCK_AMPLIFY_REPOSITORY_FILE")"
+    if [[ " $* " == *" --query app.repository "* ]]; then
+      printf '%s\n' "$repository"
+    else
+      jq -nc --arg repository "$repository" \
+        '{app:{appId:"d1ugco1rmb7yjj",repository:$repository,updateTime:"2026-07-10T00:00:00Z"}}'
+    fi
+    ;;
+  amplify:update-app)
+    input_uri="$(value_after --cli-input-json "$@")"
+    input_file="${input_uri#file://}"
+    jq -e '
+      keys == ["accessToken", "appId", "repository"]
+      and .appId == "d1ugco1rmb7yjj"
+      and .repository == "https://github.com/path2v2x/v2x-backend"
+      and .accessToken == "test-repository-token"' "$input_file" >/dev/null
+    jq -r '.repository' "$input_file" >"$MOCK_AMPLIFY_REPOSITORY_FILE"
+    printf '{}\n'
+    ;;
   apigatewayv2:create-route|apigatewayv2:update-route|apigatewayv2:create-integration|apigatewayv2:update-integration|apigatewayv2:create-stage|apigatewayv2:update-stage)
     printf '{}\n'
     ;;
@@ -191,7 +211,10 @@ chmod 0755 "$MOCK_BIN/curl"
 
 export MOCK_AWS_LOG MOCK_OBJECTS
 export MOCK_CURL_LOG="$TMP/curl-calls.log"
+export MOCK_AMPLIFY_REPOSITORY_FILE="$MOCK_STATE/amplify-repository.txt"
 : >"$MOCK_CURL_LOG"
+printf '%s\n' 'https://github.com/michaelvu1207/v2x-backend' \
+  >"$MOCK_AMPLIFY_REPOSITORY_FILE"
 
 # Route-only planning must prove that no Lambda mutation is selected.
 PATH="$MOCK_BIN:$PATH" \
@@ -302,6 +325,26 @@ for camera_id in ch1 ch2 ch3 ch4; do
 done
 if grep -Fq '{camera_id' "$MOCK_CURL_LOG"; then
   fail 'Perception link checker emitted an unrendered camera path marker'
+fi
+
+# Repository reconnection must use the lowercase AWS request schema while the
+# token stays in a mode-0600 file rather than process arguments or logs.
+PATH="$MOCK_BIN:$PATH" ACTION=plan \
+  "$ROOT/infra/amplify/reconcile-repository.sh" \
+  >"$TMP/amplify-repository-plan.txt"
+repository_hash="$(sed -n 's/^[[:space:]]*currentMetadataHash=//p' \
+  "$TMP/amplify-repository-plan.txt" | head -n 1)"
+[[ "$repository_hash" =~ ^[0-9a-f]{64}$ ]] \
+  || fail 'Amplify repository plan did not return a metadata hash'
+printf '%s\n' 'test-repository-token' | PATH="$MOCK_BIN:$PATH" \
+ACTION=apply TOKEN_FROM_STDIN=true EXPECTED_CURRENT_HASH="$repository_hash" \
+BACKUP_DIR="$TMP/amplify-repository-backup" \
+  "$ROOT/infra/amplify/reconcile-repository.sh" \
+  >"$TMP/amplify-repository-apply.txt"
+assert_contains "$MOCK_AMPLIFY_REPOSITORY_FILE" \
+  'https://github.com/path2v2x/v2x-backend'
+if grep -Fq 'test-repository-token' "$MOCK_AWS_LOG"; then
+  fail 'Amplify repository token appeared in AWS process arguments/logs'
 fi
 
 if command -v systemd-analyze >/dev/null 2>&1; then
