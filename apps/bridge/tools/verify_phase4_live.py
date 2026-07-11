@@ -501,6 +501,13 @@ def capture_scene_actor_states(world, *, actors=None):
         snapshot = world.get_snapshot()
     except (AttributeError, RuntimeError) as exc:
         raise VerificationError("cannot capture pre-frame CARLA scene snapshot") from exc
+    snapshot_frame = getattr(snapshot, "frame", None)
+    if (
+        isinstance(snapshot_frame, bool)
+        or not isinstance(snapshot_frame, int)
+        or snapshot_frame <= 0
+    ):
+        raise VerificationError("CARLA scene snapshot has no valid frame identity")
     states = []
     candidates = scene_actor_candidates(world) if actors is None else list(actors)
     for actor in candidates:
@@ -517,6 +524,7 @@ def capture_scene_actor_states(world, *, actors=None):
             "actor": actor,
             "actor_id": actor_id,
             "transform": actor_snapshot.get_transform(),
+            "snapshot_frame": snapshot_frame,
         })
     return states
 
@@ -1760,6 +1768,7 @@ async def collect_twin_object_samples(
         # and movement tolerances below.
         sync_frame = synchronize_world(world, min(1.0, remaining))
         evidence.setdefault("object_sync_frames", []).append(sync_frame)
+        scene_states_before = capture_scene_actor_states(world)
         status = await request_json(
             control_socket,
             {"type": "twin_status"},
@@ -1783,7 +1792,6 @@ async def collect_twin_object_samples(
         evidence.setdefault("object_status_sync_frames", []).append(
             status_sync_frame
         )
-        scene_states_before = capture_scene_actor_states(world)
         status = await request_json(
             control_socket,
             {"type": "twin_status"},
@@ -1821,6 +1829,12 @@ async def collect_twin_object_samples(
             raise VerificationError(
                 "pre-frame CARLA scene snapshot lacks the mapped target actor"
             )
+        captured_scene_frames = {
+            int(state["snapshot_frame"]) for state in scene_states_before
+        }
+        if len(captured_scene_frames) != 1:
+            raise VerificationError("pre-frame CARLA scene spans multiple ticks")
+        captured_scene_frame = next(iter(captured_scene_frames))
         # Keep the final status-to-frame interval free of CARLA actor/scene RPC
         # walks. Projection uses the already captured tick-bound scene state.
         jpeg, jpeg_digest, frame_metadata, frame_skew = (
@@ -1844,7 +1858,7 @@ async def collect_twin_object_samples(
             post_capture_sync_frame
         )
         frame_tick_bracket = validate_frame_carla_tick_bracket(
-            frame_metadata, status_sync_frame, post_capture_sync_frame
+            frame_metadata, captured_scene_frame, post_capture_sync_frame
         )
         validate_live_twin_camera_actor(world, camera_model)
         actors_after = scene_actor_candidates(world)
