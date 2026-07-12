@@ -9,8 +9,34 @@ Treat this file as an operating procedure, not proof of current state. Re-run th
 
 ## Newest perception release chronology
 
-Observed through 2026-07-12 19:27 UTC; verify rather than assume. This section
+Observed through 2026-07-12 19:38 UTC; verify rather than assume. This section
 overrides older perception candidate and deployment statements below.
+
+- PR 31 merged as canonical
+  `d17ed1bf690e9874d72813c73a87e04a7751be8d`. Its controlled
+  upload-disabled startup and five strict samples passed, but the first exact
+  feed round rejected ch2 because its detection-event timestamp did not
+  advance. The inherited ERR trap automatically restored verified bundle
+  `/home/path/V2XCarla/v2x-backend-backups/v2x-rollback-20260712T192801Z/`,
+  `d54f5df`, the prior unit/environment, perception, and all timers. This proves
+  raw-reader publication alone is insufficient; do not redeploy PR 31
+  unchanged.
+- Candidate `9a1b66bb1c5db80f2951aa5e1aebcedae88dbf44` runs the four
+  camera-local YOLO model/tracker calls through a persistent two-worker
+  executor. Each camera already owns an independent model/tracker; embeddings,
+  cross-camera deduplication, uploads, and event publication remain ordered
+  after inference. The systemd unit explicitly fixes the worker count at two.
+  A barrier regression fails if the calls become sequential. All 98 perception
+  tests pass. An upload-disabled canary passed 30/30 exact capture-and-event
+  feed verifiers plus 120/120 strict one-second samples across accelerated
+  renewals, with zero reconnects/errors/stale samples, latency maxima
+  ch1/ch2/ch3/ch4 = 9.237/9.257/7.603/9.059 seconds, and publication-age
+  maxima = 2.043/3.995/1.693/3.776 seconds. Cleanup passed. Evidence is
+  `/home/path/V2XCarla/v2x-evidence/perception/20260712T193315Z-parallel-inference-canary/`.
+  This remains isolated evidence. Require canonical merge, a fresh verified
+  rollback bundle, upload-disabled and upload-enabled startup, repeated exact
+  feed verifiers, LIVE/zero sessions, and the unchanged ten-minute, 30-minute,
+  and 24-hour watches before perception acceptance.
 
 - PR 30 merged as canonical
   `ec3cd60f639e7d591607474d2302b48f73f2fcfe`. Its controlled deployment
