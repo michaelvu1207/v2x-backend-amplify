@@ -1,4 +1,5 @@
 from ultralytics import YOLO
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 import math
 import os
@@ -914,6 +915,13 @@ class MultiCameraPipeline:
         media_clock_max_latency_ms = env_float(
             "V2X_PERCEPTION_MEDIA_CLOCK_MAX_LATENCY_MS", 120_000.0
         )
+        inference_workers = int(env_float(
+            "V2X_PERCEPTION_INFERENCE_WORKERS", 2
+        ))
+        if not 1 <= inference_workers <= 4:
+            raise ValueError(
+                "V2X_PERCEPTION_INFERENCE_WORKERS must be between 1 and 4"
+            )
         capture_backend = os.getenv(
             "V2X_PERCEPTION_CAPTURE_BACKEND", "opencv"
         ).strip().lower()
@@ -1106,6 +1114,10 @@ class MultiCameraPipeline:
             writer = cv2.VideoWriter(output_video, fourcc, out_fps, out_size)
 
         print(f"Starting Multi-Stream Pipeline for {num_cams} cameras...")
+        inference_executor = ThreadPoolExecutor(
+            max_workers=inference_workers if live_mode else 1,
+            thread_name_prefix="v2x-inference",
+        )
 
         try:
             for reader in live_readers:
@@ -1177,9 +1189,9 @@ class MultiCameraPipeline:
                 raw_buffer = []
                 annotated_frames = []
                 batch_event_epochs = []
+                inference_jobs = []
 
                 for i, frame in enumerate(frames_to_process):
-                    detector = self.detectors[i]
                     if frame is None:
                         if last_valid_frames[i] is not None:
                             fallback = cv2.resize(last_valid_frames[i], (640, 480))
@@ -1199,19 +1211,47 @@ class MultiCameraPipeline:
                         )
                     batch_event_epochs.append(frame_epoch)
 
-                    results = detector.model.track(frame, persist=True, conf=detector.conf, tracker="botsort.yaml", verbose=False)
+                    inference_jobs.append((
+                        i,
+                        frame,
+                        frame_epoch,
+                        frame_utc_str,
+                        frame_media_clocks[i],
+                    ))
 
-                    det_2d = detector.extract_detections(results[0], frame_count)
+                def infer_camera(job):
+                    i, frame, frame_epoch, frame_utc_str, frame_media_clock = job
+                    detector = self.detectors[i]
+                    results = detector.model.track(
+                        frame,
+                        persist=True,
+                        conf=detector.conf,
+                        tracker="botsort.yaml",
+                        verbose=False,
+                    )
+                    det_2d = detector.extract_detections(
+                        results[0], frame_count
+                    )
                     det_3d = detector.compute_3d_detections(
                         det_2d, frame_utc_str, frame_epoch
                     )
                     if live_mode:
                         attach_media_clock_metadata(
                             det_3d,
-                            frame_media_clocks[i],
+                            frame_media_clock,
                             media_clock_min_latency_ms,
                             media_clock_max_latency_ms,
                         )
+                    return i, frame, frame_utc_str, det_3d
+
+                inference_results = [
+                    inference_executor.submit(infer_camera, job)
+                    for job in inference_jobs
+                ]
+
+                for future in inference_results:
+                    i, frame, frame_utc_str, det_3d = future.result()
+                    detector = self.detectors[i]
 
                     for det in det_3d:
                         if det['object_type'] == 'person':
@@ -1280,6 +1320,7 @@ class MultiCameraPipeline:
                             break
 
         finally:
+            inference_executor.shutdown(wait=True, cancel_futures=True)
             for reader in live_readers:
                 reader.request_stop()
             stop_deadline = time.monotonic() + max(

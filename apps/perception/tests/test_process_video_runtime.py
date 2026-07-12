@@ -1,6 +1,7 @@
 import sys
 import copy
 from pathlib import Path
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -397,6 +398,19 @@ class LivePipelineTimestampTests(unittest.TestCase):
                 "source_monotonic": 500.0 + sequence,
             }
 
+    class ConcurrentFakeReader(FakeReader):
+        def snapshot(self, after_sequence):
+            self.snapshot_calls += 1
+            if after_sequence > 0:
+                raise LivePipelineTimestampTests.StopPipeline()
+            index = self.instances.index(self)
+            return {
+                "sequence": 1,
+                "frame": np.full((8, 8, 3), index, dtype=np.uint8),
+                "source_epoch": 1_000.0 + index,
+                "source_monotonic": 500.0 + index,
+            }
+
     @patch("process_video.LiveStreamReader", FakeReader)
     def test_pipeline_uses_per_camera_capture_time_and_source_age(self):
         self.FakeReader.instances.clear()
@@ -461,6 +475,38 @@ class LivePipelineTimestampTests(unittest.TestCase):
             [round(epoch) for _timestamp, epoch in detector.event_times],
             [1_001, 1_002, 1_003],
         )
+
+    @patch("process_video.LiveStreamReader", ConcurrentFakeReader)
+    def test_live_camera_inference_uses_bounded_parallel_workers(self):
+        self.ConcurrentFakeReader.instances.clear()
+        barrier = threading.Barrier(2)
+
+        class BarrierModel:
+            def track(self, *_args, **_kwargs):
+                barrier.wait(timeout=1.0)
+                return [object()]
+
+        detectors = [self.FakeDetector(), self.FakeDetector()]
+        for detector in detectors:
+            detector.model = BarrierModel()
+        pipeline = object.__new__(MultiCameraPipeline)
+        pipeline.detectors = detectors
+        pipeline.all_clean_detections = []
+        pipeline.global_tracks = {}
+        pipeline.local_to_global = {}
+        pipeline.next_global_id = 0
+        pipeline.extractor = Mock()
+
+        with self.assertRaises(self.StopPipeline):
+            pipeline.process_streams(
+                ["v2x-backend-cam-ch1", "v2x-backend-cam-ch2"],
+                show_live=False,
+                upload=False,
+                stream_broadcaster=FrameBroadcaster(["ch1", "ch2"]),
+                camera_ids=["ch1", "ch2"],
+            )
+
+        self.assertEqual([len(d.event_times) for d in detectors], [1, 1])
 
 
 if __name__ == "__main__":
