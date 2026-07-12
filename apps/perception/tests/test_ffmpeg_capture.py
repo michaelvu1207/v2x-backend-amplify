@@ -57,6 +57,7 @@ class FfmpegCaptureTests(unittest.TestCase):
         self.assertIn("/proc/self/fd/9", rendered)
         self.assertIn("-rw_timeout 7000000", rendered)
         self.assertIn("-m3u8_hold_counters 3", rendered)
+        self.assertIn("-readrate 1", rendered)
 
         file_command = build_nvdec_command(
             "/usr/bin/ffmpeg", "/tmp/input.mp4", "/tmp/frames.nut", hls=False
@@ -64,6 +65,7 @@ class FfmpegCaptureTests(unittest.TestCase):
         file_rendered = " ".join(file_command)
         self.assertNotIn("-rw_timeout", file_rendered)
         self.assertNotIn("-m3u8_hold_counters", file_rendered)
+        self.assertNotIn("-readrate", file_rendered)
 
     def test_rejects_media_playlist_and_cross_origin_variant(self):
         with self.assertRaisesRegex(NvdecCaptureError, "variant playlist"):
