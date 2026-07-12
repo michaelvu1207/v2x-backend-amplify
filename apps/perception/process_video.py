@@ -901,6 +901,13 @@ class MultiCameraPipeline:
             raise ValueError(
                 "V2X_PERCEPTION_CLOCK_HLS_FRAGMENTS must be 4 or 5"
             )
+        media_clock_invalid_grace_seconds = env_float(
+            "V2X_PERCEPTION_CLOCK_GLITCH_GRACE_SEC", 2.0
+        )
+        if not 0.0 <= media_clock_invalid_grace_seconds <= 5.0:
+            raise ValueError(
+                "V2X_PERCEPTION_CLOCK_GLITCH_GRACE_SEC must be between 0 and 5"
+            )
         media_clock_min_latency_ms = env_float(
             "V2X_PERCEPTION_MEDIA_CLOCK_MIN_LATENCY_MS", -1_000.0
         )
@@ -1002,6 +1009,9 @@ class MultiCameraPipeline:
                         else kinesis_utils.resolve_hls_media_clock
                     ),
                     media_clock_validator=_validate_media_clock,
+                    media_clock_invalid_grace_seconds=(
+                        media_clock_invalid_grace_seconds
+                    ),
                     media_clock_source_factory=(
                         lambda index=index: _clock_source_for(index)
                     ),

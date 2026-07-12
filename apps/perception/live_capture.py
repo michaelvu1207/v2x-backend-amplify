@@ -93,7 +93,8 @@ class _AsyncCapturePreparation:
                 else source
             )
             capture = self._capture_factory(source)
-            source = None
+            if self._clock_source_factory is not None:
+                source = None
             if capture is None or not capture.isOpened():
                 raise RuntimeError("capture open failed")
 
@@ -119,6 +120,12 @@ class _AsyncCapturePreparation:
                 if position is None:
                     continue
                 if clock_resolution is None:
+                    if clock_source is None:
+                        clock_source = (
+                            self._clock_source_factory()
+                            if self._clock_source_factory is not None
+                            else source
+                        )
                     clock_resolution = _AsyncMediaClockResolution(
                         self._media_clock_factory,
                         (
@@ -128,6 +135,7 @@ class _AsyncCapturePreparation:
                             self._media_frame_identity,
                         ),
                     )
+                    clock_source = None
                 resolved, media_clock = clock_resolution.poll()
                 if not resolved:
                     # Keep draining the replacement FIFO while its first exact
@@ -300,6 +308,7 @@ class LiveStreamReader:
         media_frame_identity=None,
         media_clock_retry_seconds=2.0,
         media_clock_initial_wait_seconds=0.05,
+        media_clock_invalid_grace_seconds=2.0,
         frame_identity_history_size=256,
         duplicate_frame_limit=90,
         connection_max_age_seconds=None,
@@ -324,6 +333,12 @@ class LiveStreamReader:
         self.media_clock_initial_wait_seconds = max(
             0.0, min(0.25, float(media_clock_initial_wait_seconds))
         )
+        invalid_grace = float(media_clock_invalid_grace_seconds)
+        if not math.isfinite(invalid_grace) or not 0.0 <= invalid_grace <= 5.0:
+            raise ValueError(
+                "media_clock_invalid_grace_seconds must be between 0 and 5"
+            )
+        self.media_clock_invalid_grace_seconds = invalid_grace
         self.frame_identity_history_size = max(
             1, int(frame_identity_history_size)
         )
@@ -450,12 +465,14 @@ class LiveStreamReader:
                 cap = self.capture_factory(source)
                 if cap is None or not cap.isOpened():
                     raise RuntimeError("capture open failed")
+                if self.media_clock_source_factory is not None:
+                    source = None
                 if self.media_clock_factory is None:
                     source = None
-                    clock_source = None
 
                 connected = False
                 has_trusted_media_clock = self.media_clock_factory is None
+                invalid_clock_started = None
                 connection_started = self.monotonic()
                 renewal_deadline = (
                     None
@@ -520,6 +537,7 @@ class LiveStreamReader:
                             prepared_media_clock is not None
                             or self.media_clock_factory is None
                         )
+                        invalid_clock_started = None
                         clock_resolution = None
                         last_capture_position = prepared_position
                         connection_started = self.monotonic()
@@ -589,6 +607,15 @@ class LiveStreamReader:
                         and capture_position is not None
                         and source_monotonic >= next_media_clock_retry
                     ):
+                        clock_source = (
+                            clock_source
+                            if clock_source is not None
+                            else (
+                                self.media_clock_source_factory()
+                                if self.media_clock_source_factory is not None
+                                else source
+                            )
+                        )
                         clock_resolution = _AsyncMediaClockResolution(
                             self.media_clock_factory,
                             (
@@ -598,6 +625,7 @@ class LiveStreamReader:
                                 self.media_frame_identity,
                             ),
                         )
+                        clock_source = None
                         resolved, candidate = clock_resolution.poll(
                             self.media_clock_initial_wait_seconds
                         )
@@ -626,6 +654,22 @@ class LiveStreamReader:
                             frame_media_clock, source_epoch
                         )
                     ):
+                        invalid_now = self.monotonic()
+                        if (
+                            has_trusted_media_clock
+                            and self.media_clock_invalid_grace_seconds > 0.0
+                        ):
+                            if invalid_clock_started is None:
+                                invalid_clock_started = invalid_now
+                            if (
+                                invalid_now - invalid_clock_started
+                                < self.media_clock_invalid_grace_seconds
+                            ):
+                                # HLS discontinuities can produce a brief PTS
+                                # excursion that self-corrects on subsequent
+                                # frames. Discard it without throwing away the
+                                # still-valid exact anchor.
+                                continue
                         # Discard only the frame carrying the invalid mapping
                         # and re-anchor from a later exact frame. The last
                         # trusted published frame remains subject to the normal
@@ -637,6 +681,7 @@ class LiveStreamReader:
                             self.monotonic()
                             + self.media_clock_retry_seconds
                         )
+                        invalid_clock_started = None
                         continue
                     if self.media_clock_factory is not None:
                         if frame_media_clock is None and has_trusted_media_clock:
@@ -647,6 +692,7 @@ class LiveStreamReader:
                             continue
                         if frame_media_clock is not None:
                             has_trusted_media_clock = True
+                            invalid_clock_started = None
                     self._remember_frame_identity(identity)
                     self._consecutive_duplicate_frames = 0
                     self.recovery.record_success()

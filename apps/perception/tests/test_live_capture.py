@@ -333,6 +333,7 @@ class LiveStreamReaderTests(unittest.TestCase):
             ),
             capture_position_milliseconds=lambda cap: cap.get(0),
             media_clock_retry_seconds=0.1,
+            media_clock_invalid_grace_seconds=0.0,
         )
         reader.start()
         try:
@@ -382,6 +383,7 @@ class LiveStreamReaderTests(unittest.TestCase):
             ),
             capture_position_milliseconds=lambda cap: cap.get(0),
             media_clock_retry_seconds=0.1,
+            media_clock_invalid_grace_seconds=0.0,
         )
         reader.start()
         try:
@@ -411,6 +413,45 @@ class LiveStreamReaderTests(unittest.TestCase):
             )
         finally:
             release_reanchor.set()
+            reader.stop(timeout=2.0)
+
+    def test_transient_invalid_clock_is_discarded_without_reanchor(self):
+        capture = ContinuousCapture("clock-glitch")
+        calls = []
+        valid = "2026-07-10T03:57:23.388Z"
+        invalid = "2026-07-10T03:57:30.000Z"
+
+        def media_clock_factory(*_args):
+            calls.append(1)
+            return SequencedMediaClock([valid, invalid, valid])
+
+        reader = LiveStreamReader(
+            source_factory=lambda: "signed-session",
+            capture_factory=lambda _source: capture,
+            recovery=StreamRecovery(0.1, 0.1),
+            media_clock_factory=media_clock_factory,
+            media_clock_validator=lambda clock, _epoch: (
+                clock["media_timestamp_utc"] == valid
+            ),
+            capture_position_milliseconds=lambda cap: cap.get(0),
+            media_clock_invalid_grace_seconds=1.0,
+        )
+        reader.start()
+        try:
+            sequence = 0
+            trusted_sequences = []
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and len(trusted_sequences) < 2:
+                snapshot = reader.wait_for_frame(sequence, timeout=0.2)
+                if snapshot is None:
+                    continue
+                sequence = snapshot["sequence"]
+                if snapshot.get("media_clock") is not None:
+                    trusted_sequences.append(sequence)
+            self.assertEqual(len(trusted_sequences), 2)
+            self.assertEqual(calls, [1])
+            self.assertGreater(trusted_sequences[1], trusted_sequences[0])
+        finally:
             reader.stop(timeout=2.0)
 
     def test_clock_resolution_uses_independent_connection_local_source(self):
