@@ -21,6 +21,13 @@ from runtime_health import sanitize_source_error  # noqa: E402
 
 
 CAMERA_IDS = ("ch1", "ch2", "ch3", "ch4")
+# Kinesis fragments at this site are about 2.002 seconds long. Sampling at
+# exactly two seconds aliases the producer boundary and can see the same last
+# completed frame twice. This is an observation window, not a freshness gate;
+# the independent max-age and per-second health watches remain unchanged.
+DEFAULT_SAMPLE_INTERVAL_SECONDS = 3.0
+DEFAULT_INFERENCE_PROGRESS_TIMEOUT_SECONDS = 10.0
+INFERENCE_POLL_INTERVAL_SECONDS = 0.25
 
 
 class VerificationError(RuntimeError):
@@ -109,9 +116,29 @@ def _collect_timestamp_sample(base_url, timeout_seconds):
             or health_camera.get("fresh") is not True
         ):
             raise VerificationError(f"{camera_id} is not fresh and streaming")
+        if (
+            health_camera.get("media_clock_status") != "matched"
+            or health_camera.get("media_time_trusted") is not True
+        ):
+            raise VerificationError(f"{camera_id} media clock is not trusted")
+        decode_latency_ms = health_camera.get("decode_latency_ms")
+        if (
+            isinstance(decode_latency_ms, bool)
+            or not isinstance(decode_latency_ms, (int, float))
+            or not -1_000.0 <= float(decode_latency_ms) <= 10_000.0
+        ):
+            raise VerificationError(f"{camera_id} decode latency is out of bounds")
         frame_count = health_camera.get("frame_count")
         if not isinstance(frame_count, int) or isinstance(frame_count, bool):
             raise VerificationError(f"{camera_id} frame count is invalid")
+        inference_frame_count = health_camera.get("inference_frame_count")
+        if (
+            not isinstance(inference_frame_count, int)
+            or isinstance(inference_frame_count, bool)
+            or inference_frame_count < 1
+            or health_camera.get("inference_fresh") is not True
+        ):
+            raise VerificationError(f"{camera_id} inference state is not fresh")
         sample[camera_id] = {
             "capture": parse_utc_timestamp(
                 health_camera.get("source_updated_at"),
@@ -122,6 +149,7 @@ def _collect_timestamp_sample(base_url, timeout_seconds):
                 f"{camera_id} event timestamp",
             ),
             "frame_count": frame_count,
+            "inference_frame_count": inference_frame_count,
         }
     return sample
 
@@ -197,7 +225,14 @@ def _read_mjpeg_hashes(url, timeout_seconds):
     return hashes
 
 
-def _validate_timestamp_samples(first, second, max_age_seconds, now=None):
+def _validate_timestamp_samples(
+    first,
+    second,
+    max_age_seconds,
+    now=None,
+    require_inference_progress=True,
+    require_capture_progress=True,
+):
     now = datetime.now(timezone.utc) if now is None else now.astimezone(timezone.utc)
     max_age_seconds = float(max_age_seconds)
     if max_age_seconds <= 0:
@@ -210,9 +245,20 @@ def _validate_timestamp_samples(first, second, max_age_seconds, now=None):
         for timestamp_name in ("capture", "event"):
             before = first_camera[timestamp_name]
             after = second_camera[timestamp_name]
-            if after <= before:
+            if (
+                timestamp_name == "capture"
+                and (
+                    after < before
+                    or (require_capture_progress and after == before)
+                )
+            ):
                 raise VerificationError(
-                    f"{camera_id} {timestamp_name} timestamp did not advance"
+                    f"{camera_id} {timestamp_name} timestamp "
+                    + ("regressed" if after < before else "did not advance")
+                )
+            if timestamp_name == "event" and after < before:
+                raise VerificationError(
+                    f"{camera_id} {timestamp_name} timestamp regressed"
                 )
             for timestamp in (before, after):
                 age = (now - timestamp).total_seconds()
@@ -220,8 +266,22 @@ def _validate_timestamp_samples(first, second, max_age_seconds, now=None):
                     raise VerificationError(
                         f"{camera_id} {timestamp_name} timestamp is outside max age"
                     )
-        if second_camera["frame_count"] <= first_camera["frame_count"]:
+        if second_camera["frame_count"] < first_camera["frame_count"]:
+            raise VerificationError(f"{camera_id} frame count regressed")
+        if (
+            require_capture_progress
+            and second_camera["frame_count"] == first_camera["frame_count"]
+        ):
             raise VerificationError(f"{camera_id} frame count did not advance")
+        inference_advanced = (
+            second_camera["inference_frame_count"]
+            > first_camera["inference_frame_count"]
+            and second_camera["event"] > first_camera["event"]
+        )
+        if require_inference_progress and not inference_advanced:
+            raise VerificationError(
+                f"{camera_id} inference did not advance within deadline"
+            )
         output[camera_id] = {
             "capture_times": [
                 first_camera["capture"].isoformat().replace("+00:00", "Z"),
@@ -231,16 +291,24 @@ def _validate_timestamp_samples(first, second, max_age_seconds, now=None):
                 first_camera["event"].isoformat().replace("+00:00", "Z"),
                 second_camera["event"].isoformat().replace("+00:00", "Z"),
             ],
+            "inference_frame_counts": [
+                first_camera["inference_frame_count"],
+                second_camera["inference_frame_count"],
+            ],
         }
     return output
 
 
 def verify_live_feeds(
     base_url,
-    sample_interval_seconds=2.0,
+    sample_interval_seconds=DEFAULT_SAMPLE_INTERVAL_SECONDS,
     max_age_seconds=15.0,
     timeout_seconds=20.0,
     stream_path_template="/streams/{camera_id}.mjpg",
+    inference_progress_timeout_seconds=(
+        DEFAULT_INFERENCE_PROGRESS_TIMEOUT_SECONDS
+    ),
+    inference_poll_interval_seconds=INFERENCE_POLL_INTERVAL_SECONDS,
 ):
     base_url = normalize_base_url(base_url)
     timeout_seconds = float(timeout_seconds)
@@ -254,10 +322,76 @@ def verify_live_feeds(
     ):
         raise VerificationError("stream path template is invalid")
 
+    inference_progress_timeout_seconds = float(
+        inference_progress_timeout_seconds
+    )
+    inference_poll_interval_seconds = float(inference_poll_interval_seconds)
+    if inference_progress_timeout_seconds <= 0:
+        raise VerificationError("inference progress timeout must be positive")
+    if inference_poll_interval_seconds < 0:
+        raise VerificationError("inference poll interval cannot be negative")
+
     first = _collect_timestamp_sample(base_url, timeout_seconds)
+    inference_deadline = (
+        time.monotonic() + inference_progress_timeout_seconds
+    )
     time.sleep(max(0.0, float(sample_interval_seconds)))
     second = _collect_timestamp_sample(base_url, timeout_seconds)
-    output = _validate_timestamp_samples(first, second, max_age_seconds)
+    _validate_timestamp_samples(
+        first,
+        second,
+        max_age_seconds,
+        require_inference_progress=False,
+    )
+
+    progressed = {
+        camera_id: second[camera_id]
+        for camera_id in CAMERA_IDS
+        if (
+            second[camera_id]["inference_frame_count"]
+            > first[camera_id]["inference_frame_count"]
+            and second[camera_id]["event"] > first[camera_id]["event"]
+        )
+    }
+    previous = second
+    while len(progressed) != len(CAMERA_IDS):
+        remaining = inference_deadline - time.monotonic()
+        if remaining <= 0:
+            missing = sorted(set(CAMERA_IDS) - set(progressed))
+            raise VerificationError(
+                "inference did not advance within deadline for "
+                + ",".join(missing)
+            )
+        time.sleep(min(inference_poll_interval_seconds, remaining))
+        current = _collect_timestamp_sample(base_url, timeout_seconds)
+        _validate_timestamp_samples(
+            previous,
+            current,
+            max_age_seconds,
+            require_inference_progress=False,
+            require_capture_progress=False,
+        )
+        for camera_id in CAMERA_IDS:
+            if camera_id in progressed:
+                continue
+            if (
+                current[camera_id]["inference_frame_count"]
+                > first[camera_id]["inference_frame_count"]
+                and current[camera_id]["event"] > first[camera_id]["event"]
+            ):
+                progressed[camera_id] = current[camera_id]
+        previous = current
+
+    final = {
+        camera_id: progressed[camera_id]
+        for camera_id in CAMERA_IDS
+    }
+    output = _validate_timestamp_samples(
+        first,
+        final,
+        max_age_seconds,
+        require_inference_progress=True,
+    )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
@@ -284,8 +418,22 @@ def main(argv=None):
         description="Verify fresh, changing ch1-ch4 perception feeds."
     )
     parser.add_argument("base_url")
-    parser.add_argument("--sample-interval", type=float, default=2.0)
+    parser.add_argument(
+        "--sample-interval",
+        type=float,
+        default=DEFAULT_SAMPLE_INTERVAL_SECONDS,
+        help=(
+            "seconds between timestamp samples; defaults above the measured "
+            "2.002-second fragment cadence"
+        ),
+    )
     parser.add_argument("--max-age", type=float, default=15.0)
+    parser.add_argument(
+        "--inference-progress-timeout",
+        type=float,
+        default=DEFAULT_INFERENCE_PROGRESS_TIMEOUT_SECONDS,
+        help="maximum seconds for every camera inference counter to advance",
+    )
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument(
         "--stream-path-template", default="/streams/{camera_id}.mjpg"
@@ -298,6 +446,9 @@ def main(argv=None):
             max_age_seconds=args.max_age,
             timeout_seconds=args.timeout,
             stream_path_template=args.stream_path_template,
+            inference_progress_timeout_seconds=(
+                args.inference_progress_timeout
+            ),
         )
     except Exception as exc:
         print(

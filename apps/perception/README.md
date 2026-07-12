@@ -90,6 +90,15 @@ python tools/verify_live_feeds.py http://127.0.0.1:8090
 python tools/verify_live_feeds.py https://<candidate-perception-host>
 ```
 
+The verifier samples raw capture timestamps three seconds apart because the
+measured live fragment cadence is about 2.002 seconds. It separately polls each
+camera's explicit inference counter for at most ten seconds, so a normal
+two-worker inference phase is not mistaken for a stalled camera. Health fails
+closed when any inference result is more than ten seconds old. The verifier
+still requires two distinct complete JPEGs per camera, the unchanged 15-second
+capture/event maximum age, trusted matched media clocks, and the unchanged
+-1,000/+10,000 ms decode-latency bounds.
+
 The verifier refuses base URLs or stream templates containing credentials,
 queries, or fragments and prints only per-camera timestamps and SHA-256 hashes.
 
