@@ -29,7 +29,7 @@ override every older PR 32/candidate statement below.
   zero sessions, perception, and all three safety timers healthy. Do not call
   PR 36 deployed or accepted, and do not attribute the reader failure to the
   identity-only change without stronger evidence.
-- Candidate `cd4ddb2ec83008e88234a91cae544101e6253663` preserves the last
+- Candidate `77a6dcac428c3d7f331ae98ca143f5be7a17eae1` preserves the last
   trusted frame while a terminal FIFO read triggers a bounded five-second
   off-thread replacement. The replacement must obtain a fresh signed session,
   decode a real frame, and validate its exact media-clock mapping before atomic
@@ -37,7 +37,9 @@ override every older PR 32/candidate statement below.
   The 15-second freshness, ten-second capture/inference progress, -1/+10-second
   clock, duplicate-frame, and zero-reconnect gates are unchanged. It also makes
   abandoned asynchronous preparations cancellation-safe so they cannot retain
-  a hidden FFmpeg capture. Verification passed 138 perception tests, 241 bridge
+  a hidden FFmpeg capture. Fast preparation failures are limited to one fresh
+  attempt so an outage cannot spin on session minting. Verification passed 139
+  perception tests, 241 bridge
   tests in the intended Python 3.10 environment, and 23 generated read-API
   tests. This is source evidence only: require canonical merge, a fresh verified
   rollback bundle, upload-disabled and upload-enabled startup, uninterrupted
