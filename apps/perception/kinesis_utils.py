@@ -21,9 +21,11 @@ load_dotenv()
 
 # Bound exact-fragment GPU work across all camera clock threads. During one
 # staggered hot handover the process owns four active readers and one prepared
-# reader; three match workers keep the total at eight decoder sessions while a
-# single re-anchor completes five fragments in two batches.
-_NVDEC_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=3)
+# reader; two match workers cap the total at seven decoder sessions. The prior
+# eight-session peak intermittently starved active readers long enough to trip
+# the unchanged 15-second freshness gate. Exact matching still covers every
+# fragment; the smaller pool changes scheduling only, not clock evidence.
+_NVDEC_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
 
 def _utc_iso(epoch):
