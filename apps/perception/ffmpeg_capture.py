@@ -158,13 +158,6 @@ def build_nvdec_command(ffmpeg_binary, input_reference, fifo_path, *, hls):
                 "hls",
                 "-m3u8_hold_counters",
                 str(_HLS_HOLD_COUNTERS),
-                # Kinesis publishes completed ~2 second fragments. Without
-                # input pacing FFmpeg emits each fragment as a burst followed
-                # by an idle gap, so a healthy camera can miss a two-second
-                # advancement check. Pace live media at its native rate; exact
-                # file-fragment matching remains intentionally unthrottled.
-                "-readrate",
-                "1",
             ]
         )
     command.extend(
