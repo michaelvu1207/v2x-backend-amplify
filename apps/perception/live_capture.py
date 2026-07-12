@@ -512,11 +512,16 @@ class LiveStreamReader:
                         done, _result, failed = proactive_preparation.poll()
                         if done:
                             if failed or _result is None:
-                                raise RuntimeError(
-                                    "proactive capture preparation failed"
-                                )
-                            prepared = proactive_preparation.take()
-                            proactive_preparation = None
+                                # Preparation is deliberately off-path. A
+                                # transient source/clock failure must not tear
+                                # down a still-readable active session. Drop
+                                # the failed helper, keep draining the current
+                                # capture, and let the normal deadline retry.
+                                proactive_preparation = None
+                                renewal_deadline = self.monotonic() + 1.0
+                            else:
+                                prepared = proactive_preparation.take()
+                                proactive_preparation = None
 
                     if prepared is None:
                         ret, frame = cap.read()
@@ -661,6 +666,19 @@ class LiveStreamReader:
                         )
                     ):
                         invalid_now = self.monotonic()
+                        if (
+                            has_trusted_media_clock
+                            and self.connection_max_age_seconds is not None
+                            and proactive_preparation is None
+                        ):
+                            # Begin validating a replacement immediately while
+                            # the short glitch grace still lets the current
+                            # exact anchor self-correct. Waiting until grace
+                            # expired consumed recovery time needed by the
+                            # unchanged 15-second freshness gate.
+                            proactive_preparation = (
+                                self._prepare_replacement_capture()
+                            )
                         if (
                             has_trusted_media_clock
                             and self.media_clock_invalid_grace_seconds > 0.0

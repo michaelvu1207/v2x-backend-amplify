@@ -260,6 +260,47 @@ class LiveStreamReaderTests(unittest.TestCase):
             release_replacement_clock.set()
             reader.stop(timeout=2.0)
 
+    def test_failed_proactive_preparation_keeps_active_reader_streaming(self):
+        source_calls = []
+        captures = []
+        states = []
+
+        def source_factory():
+            source = f"signed-session-{len(source_calls) + 1}"
+            source_calls.append(source)
+            return source
+
+        def capture_factory(source):
+            if not captures:
+                capture = ContinuousCapture(source)
+            else:
+                capture = ScriptedCapture([])
+            captures.append(capture)
+            return capture
+
+        reader = LiveStreamReader(
+            source_factory=source_factory,
+            capture_factory=capture_factory,
+            recovery=StreamRecovery(0.1, 0.1),
+            state_callback=lambda **event: states.append(event),
+            connection_max_age_seconds=0.1,
+            connection_renewal_lead_seconds=0.05,
+        )
+        reader.start()
+        try:
+            first = reader.wait_for_frame(0, timeout=1.0)
+            self.assertIsNotNone(first)
+            self.assertTrue(self.wait_until(lambda: len(captures) >= 2))
+            later = reader.wait_for_frame(first["sequence"], timeout=1.0)
+            self.assertIsNotNone(later)
+            self.assertGreater(later["sequence"], first["sequence"])
+            self.assertFalse(captures[0].released)
+            self.assertFalse(any(
+                event["state"] == "reconnecting" for event in states
+            ))
+        finally:
+            reader.stop(timeout=2.0)
+
     def test_snapshot_never_relabels_the_same_frame_as_new(self):
         release_read = threading.Event()
         reader = LiveStreamReader(
