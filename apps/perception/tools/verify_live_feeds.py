@@ -21,6 +21,11 @@ from runtime_health import sanitize_source_error  # noqa: E402
 
 
 CAMERA_IDS = ("ch1", "ch2", "ch3", "ch4")
+# Kinesis fragments at this site are about 2.002 seconds long. Sampling at
+# exactly two seconds aliases the producer boundary and can see the same last
+# completed frame twice. This is an observation window, not a freshness gate;
+# the independent max-age and per-second health watches remain unchanged.
+DEFAULT_SAMPLE_INTERVAL_SECONDS = 3.0
 
 
 class VerificationError(RuntimeError):
@@ -237,7 +242,7 @@ def _validate_timestamp_samples(first, second, max_age_seconds, now=None):
 
 def verify_live_feeds(
     base_url,
-    sample_interval_seconds=2.0,
+    sample_interval_seconds=DEFAULT_SAMPLE_INTERVAL_SECONDS,
     max_age_seconds=15.0,
     timeout_seconds=20.0,
     stream_path_template="/streams/{camera_id}.mjpg",
@@ -284,7 +289,15 @@ def main(argv=None):
         description="Verify fresh, changing ch1-ch4 perception feeds."
     )
     parser.add_argument("base_url")
-    parser.add_argument("--sample-interval", type=float, default=2.0)
+    parser.add_argument(
+        "--sample-interval",
+        type=float,
+        default=DEFAULT_SAMPLE_INTERVAL_SECONDS,
+        help=(
+            "seconds between timestamp samples; defaults above the measured "
+            "2.002-second fragment cadence"
+        ),
+    )
     parser.add_argument("--max-age", type=float, default=15.0)
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument(

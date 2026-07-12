@@ -14,6 +14,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 from verify_live_feeds import (  # noqa: E402
     CAMERA_IDS,
+    DEFAULT_SAMPLE_INTERVAL_SECONDS,
     VerificationError,
     main,
     normalize_base_url,
@@ -132,6 +133,7 @@ class LiveFeedVerifierTests(unittest.TestCase):
         self.thread.join(timeout=2.0)
 
     def test_verifies_advancing_times_and_two_changed_frames_per_camera(self):
+        self.assertEqual(DEFAULT_SAMPLE_INTERVAL_SECONDS, 3.0)
         result = verify_live_feeds(
             self.base_url,
             sample_interval_seconds=0,

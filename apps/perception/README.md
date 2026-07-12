@@ -90,6 +90,12 @@ python tools/verify_live_feeds.py http://127.0.0.1:8090
 python tools/verify_live_feeds.py https://<candidate-perception-host>
 ```
 
+The verifier samples timestamps three seconds apart because the measured live
+fragment cadence is about 2.002 seconds. This avoids aliasing a fragment
+boundary; it still requires both timestamps to advance, two distinct complete
+JPEGs per camera, the unchanged 15-second maximum age, and separate strict
+per-second media-clock/latency monitoring.
+
 The verifier refuses base URLs or stream templates containing credentials,
 queries, or fragments and prints only per-camera timestamps and SHA-256 hashes.
 
