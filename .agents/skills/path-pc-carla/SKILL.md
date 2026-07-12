@@ -9,8 +9,56 @@ Treat this file as an operating procedure, not proof of current state. Re-run th
 
 ## Newest perception release chronology
 
-Observed through 2026-07-12 18:46 UTC; verify rather than assume. This section
+Observed through 2026-07-12 19:15 UTC; verify rather than assume. This section
 overrides older perception candidate and deployment statements below.
+
+- PR 29 merged as canonical
+  `9d541d2cdc2dfd3fcf86dfbb867129c94c38d12b`. Its controlled deployment
+  used the verified rollback bundle
+  `/home/path/V2XCarla/v2x-backend-backups/v2x-rollback-20260712T184900Z/`
+  and started with uploads disabled. Five strict all-camera health samples
+  passed, but the independent four-feed verifier rejected ch1 because its
+  capture timestamp did not advance across the fixed two-sample interval. The
+  deployment automatically restored `d54f5df`, the prior unit and environment,
+  perception, and all timers; CARLA/Drive/web were unchanged. Do not redeploy
+  PR 29 unchanged.
+- A live-loop defect then proved that reader sequences were advanced before a
+  global every-other-iteration inference throttle. A camera frame arriving on
+  a throttled iteration was permanently discarded and repeated phase alignment
+  could starve one channel. Commit `36e0f065da7ab3346cc66a507bca4518fa8c8b35`
+  preserves those sequences until an inference iteration actually consumes
+  them. Ten consecutive feed verifiers passed, but the stronger accelerated
+  watch still failed ch3 stale at sample 47; retain
+  `/home/path/V2XCarla/v2x-evidence/perception/20260712T185552Z-live-throttle-sequence-canary/`.
+- Reducing the exact-clock fragment-match pool from three to two capped peak
+  decoder sessions at seven and improved normal cadence. That intermediate
+  candidate still failed at sample 96 when ch4 reported
+  `proactive capture preparation failed` and reconnected while ch2 aged to
+  14.95 seconds. Retain
+  `/home/path/V2XCarla/v2x-evidence/perception/20260712T190257Z-nvdec-pool2-five-minute-canary/`.
+- Candidate `28c223006bdca95b826a60dca8f1686f63565547` combines the sequence
+  preservation, seven-session cap, immediate hot preparation on the first
+  invalid trusted-clock sample, and retryable off-path preparation failure.
+  A failed replacement no longer tears down a still-readable active session;
+  real active-reader failures remain reconnecting/stale and the -1/+10-second
+  clock plus 15-second freshness thresholds are unchanged. All 96 perception
+  tests pass. The upload-disabled four-camera canary passed ten consecutive
+  exact feed verifiers and 300/300 strict one-second samples across repeated
+  30-second accelerated renewals, with zero reconnects/errors/stale samples,
+  latency maxima ch1/ch2/ch3/ch4 = 7.989/8.324/8.023/9.662 seconds, and
+  publication-age maxima = 4.935/6.474/3.072/3.602 seconds. Every owned process
+  was cleaned up. Evidence is
+  `/home/path/V2XCarla/v2x-evidence/perception/20260712T190843Z-prep-retry-five-minute-canary/`.
+  This remains isolated candidate evidence. Require a canonical merge, a fresh
+  verified rollback bundle, controlled upload-disabled then upload-enabled
+  startup gates, four changing feeds, LIVE/zero sessions, a full ten-minute
+  renewal watch, then attended 30-minute and automated 24-hour watches. Roll
+  back immediately on any unchanged gate.
+- The normal 12:00 PDT hourly UE5/Drive restart completed successfully at
+  19:01:16 UTC. It produced fresh CARLA/Drive PIDs with `NRestarts=0`, LIVE
+  mode, zero sessions, and zero actors. The current live perception checkout
+  remains the deliberate rolled-back `d54f5df` baseline until a newer canonical
+  candidate passes its controlled deployment.
 
 - PR 28 merged as canonical
   `0bb596b227cad420c77e12516fb4dc77a11af5e0`. Its read Lambda code-only
