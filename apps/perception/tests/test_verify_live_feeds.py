@@ -14,6 +14,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 from verify_live_feeds import (  # noqa: E402
     CAMERA_IDS,
+    DEFAULT_INFERENCE_PROGRESS_TIMEOUT_SECONDS,
     DEFAULT_SAMPLE_INTERVAL_SECONDS,
     VerificationError,
     main,
@@ -29,6 +30,9 @@ class LiveFeedVerifierTests(unittest.TestCase):
             "event_samples": 0,
             "identical_frames": False,
             "advance_timestamps": True,
+            "inference_hold_samples": 0,
+            "decode_latency_ms": 500.0,
+            "media_time_trusted": True,
             "base_time": datetime.now(timezone.utc) - timedelta(seconds=1),
         }
         state = self.state
@@ -66,6 +70,18 @@ class LiveFeedVerifierTests(unittest.TestCase):
                                 "fresh": True,
                                 "source_updated_at": timestamp,
                                 "frame_count": 100 + sample,
+                                "inference_frame_count": 100 + max(
+                                    1,
+                                    sample - state["inference_hold_samples"],
+                                ),
+                                "inference_fresh": True,
+                                "media_clock_status": "matched",
+                                "media_time_trusted": state[
+                                    "media_time_trusted"
+                                ],
+                                "decode_latency_ms": state[
+                                    "decode_latency_ms"
+                                ],
                             }
                             for camera_id in CAMERA_IDS
                         },
@@ -75,7 +91,10 @@ class LiveFeedVerifierTests(unittest.TestCase):
                 if self.path == "/detections/latest":
                     state["event_samples"] += 1
                     sample = state["event_samples"]
-                    timestamp = self.timestamp(sample)
+                    timestamp = self.timestamp(max(
+                        1,
+                        sample - state["inference_hold_samples"],
+                    ))
                     self.send_json({
                         "cameras": {
                             camera_id: {"updated_at": timestamp}
@@ -134,6 +153,7 @@ class LiveFeedVerifierTests(unittest.TestCase):
 
     def test_verifies_advancing_times_and_two_changed_frames_per_camera(self):
         self.assertEqual(DEFAULT_SAMPLE_INTERVAL_SECONDS, 3.0)
+        self.assertEqual(DEFAULT_INFERENCE_PROGRESS_TIMEOUT_SECONDS, 10.0)
         result = verify_live_feeds(
             self.base_url,
             sample_interval_seconds=0,
@@ -145,6 +165,7 @@ class LiveFeedVerifierTests(unittest.TestCase):
             camera = result[camera_id]
             self.assertEqual(len(camera["capture_times"]), 2)
             self.assertEqual(len(camera["event_times"]), 2)
+            self.assertEqual(len(camera["inference_frame_counts"]), 2)
             self.assertEqual(len(camera["frame_sha256"]), 2)
             self.assertNotEqual(
                 camera["frame_sha256"][0], camera["frame_sha256"][1]
@@ -171,6 +192,67 @@ class LiveFeedVerifierTests(unittest.TestCase):
                 max_age_seconds=10,
                 timeout_seconds=2,
             )
+
+    def test_polls_through_a_phase_aliased_inference_sample(self):
+        self.state["inference_hold_samples"] = 2
+        result = verify_live_feeds(
+            self.base_url,
+            sample_interval_seconds=0,
+            max_age_seconds=10,
+            timeout_seconds=2,
+            inference_progress_timeout_seconds=1,
+            inference_poll_interval_seconds=0,
+        )
+        for camera in result.values():
+            self.assertGreater(
+                camera["inference_frame_counts"][1],
+                camera["inference_frame_counts"][0],
+            )
+
+    def test_inference_progress_deadline_fails_closed(self):
+        self.state["inference_hold_samples"] = 1_000_000
+        with self.assertRaisesRegex(
+            VerificationError, "inference did not advance within deadline"
+        ):
+            verify_live_feeds(
+                self.base_url,
+                sample_interval_seconds=0,
+                max_age_seconds=10,
+                timeout_seconds=2,
+                inference_progress_timeout_seconds=0.005,
+                inference_poll_interval_seconds=0.001,
+            )
+
+    def test_untrusted_clock_or_out_of_bounds_latency_fails(self):
+        for field, value, message in (
+            ("media_time_trusted", False, "media clock is not trusted"),
+            ("decode_latency_ms", -1000.01, "decode latency is out of bounds"),
+            ("decode_latency_ms", 10000.01, "decode latency is out of bounds"),
+        ):
+            with self.subTest(field=field, value=value):
+                self.state[field] = value
+                with self.assertRaisesRegex(VerificationError, message):
+                    verify_live_feeds(
+                        self.base_url,
+                        sample_interval_seconds=0,
+                        max_age_seconds=10,
+                        timeout_seconds=2,
+                    )
+                self.state[field] = (
+                    True if field == "media_time_trusted" else 500.0
+                )
+
+    def test_decode_latency_boundaries_are_inclusive(self):
+        for value in (-1000.0, 10000.0):
+            with self.subTest(value=value):
+                self.state["decode_latency_ms"] = value
+                result = verify_live_feeds(
+                    self.base_url,
+                    sample_interval_seconds=0,
+                    max_age_seconds=10,
+                    timeout_seconds=2,
+                )
+                self.assertEqual(set(result), set(CAMERA_IDS))
 
     def test_query_or_signed_input_is_rejected_without_echoing_it(self):
         secret_url = (

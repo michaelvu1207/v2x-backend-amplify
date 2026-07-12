@@ -45,9 +45,43 @@ class FrameBroadcasterTests(unittest.TestCase):
         self.assertFalse(self.broadcaster.snapshot_health()["ready"])
 
         self.broadcaster.publish("ch2", self.frame, "2026-07-10T00:00:00.000Z")
+        self.assertFalse(self.broadcaster.snapshot_health()["ready"])
+
+        self.broadcaster.publish_detections("ch1", [])
+        self.assertFalse(self.broadcaster.snapshot_health()["ready"])
+        self.broadcaster.publish_detections("ch2", [])
         health = self.broadcaster.snapshot_health()
         self.assertTrue(health["ready"])
         self.assertEqual(health["status"], "ok")
+        self.assertTrue(health["cameras"]["ch1"]["inference_fresh"])
+        self.assertEqual(
+            health["cameras"]["ch1"]["inference_frame_count"], 1
+        )
+
+    def test_health_fails_closed_when_inference_stalls_behind_capture(self):
+        broadcaster = FrameBroadcaster(
+            ["ch1"], stale_seconds=15.0, inference_stale_seconds=10.0
+        )
+        broadcaster.publish(
+            "ch1", self.frame, source_monotonic=100.0
+        )
+        broadcaster.publish_detections(
+            "ch1", [], inference_monotonic=100.0
+        )
+        self.assertTrue(
+            broadcaster.snapshot_health(now_monotonic=109.9)["ready"]
+        )
+
+        broadcaster.publish(
+            "ch1", self.frame, source_monotonic=110.1
+        )
+        health = broadcaster.snapshot_health(now_monotonic=110.1)
+        self.assertTrue(health["cameras"]["ch1"]["fresh"])
+        self.assertFalse(health["cameras"]["ch1"]["inference_fresh"])
+        self.assertEqual(
+            health["cameras"]["ch1"]["inference_age_seconds"], 10.1
+        )
+        self.assertFalse(health["ready"])
 
     def test_stale_and_reconnecting_states_are_visible(self):
         self.broadcaster.publish("ch1", self.frame)

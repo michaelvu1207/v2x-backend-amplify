@@ -262,10 +262,17 @@ def parse_camera_ids(video_paths):
     return camera_ids
 
 class FrameBroadcaster:
-    def __init__(self, camera_ids, jpeg_quality=80, stale_seconds=15.0):
+    def __init__(
+        self,
+        camera_ids,
+        jpeg_quality=80,
+        stale_seconds=15.0,
+        inference_stale_seconds=10.0,
+    ):
         self.camera_ids = list(camera_ids)
         self.jpeg_quality = int(jpeg_quality)
         self.stale_seconds = float(stale_seconds)
+        self.inference_stale_seconds = float(inference_stale_seconds)
         self.frames = {}
         self.frame_counts = {camera_id: 0 for camera_id in self.camera_ids}
         self.camera_health = {
@@ -288,6 +295,12 @@ class FrameBroadcaster:
                 "detections": [],
             }
             for camera_id in self.camera_ids
+        }
+        self.inference_counts = {
+            camera_id: 0 for camera_id in self.camera_ids
+        }
+        self.last_inference_monotonic = {
+            camera_id: None for camera_id in self.camera_ids
         }
         self.condition = threading.Condition()
 
@@ -343,7 +356,13 @@ class FrameBroadcaster:
                 })
             self.condition.notify_all()
 
-    def publish_detections(self, camera_id, detections, source_updated_at=None):
+    def publish_detections(
+        self,
+        camera_id,
+        detections,
+        source_updated_at=None,
+        inference_monotonic=None,
+    ):
         summary = []
         for det in detections:
             metadata = det.get("camera_data", {}).get("bifocal_metadata", {})
@@ -367,9 +386,18 @@ class FrameBroadcaster:
             })
 
         with self.condition:
+            self.inference_counts[camera_id] = (
+                self.inference_counts.get(camera_id, 0) + 1
+            )
+            self.last_inference_monotonic[camera_id] = (
+                time.monotonic()
+                if inference_monotonic is None
+                else float(inference_monotonic)
+            )
             self.latest_detections[camera_id] = {
                 "updated_at": source_updated_at or utc_iso(),
                 "frame_count": self.frame_counts.get(camera_id, 0),
+                "inference_frame_count": self.inference_counts[camera_id],
                 "detections": summary,
             }
             self.condition.notify_all()
@@ -402,12 +430,27 @@ class FrameBroadcaster:
             for camera_id in self.camera_ids:
                 entry = self.camera_health[camera_id]
                 last_frame = entry["last_frame_monotonic"]
+                last_inference = self.last_inference_monotonic[camera_id]
                 age_seconds = None if last_frame is None else max(0.0, now - last_frame)
+                inference_age_seconds = (
+                    None
+                    if last_inference is None
+                    else max(0.0, now - last_inference)
+                )
                 fresh = age_seconds is not None and age_seconds <= self.stale_seconds
+                inference_fresh = (
+                    inference_age_seconds is not None
+                    and inference_age_seconds <= self.inference_stale_seconds
+                )
                 state = entry["state"]
                 if state == "streaming" and not fresh:
                     state = "stale"
-                ready = ready and fresh and state == "streaming"
+                ready = (
+                    ready
+                    and fresh
+                    and inference_fresh
+                    and state == "streaming"
+                )
                 media_clock_ready = (
                     media_clock_ready and entry["media_time_trusted"] is True
                 )
@@ -417,6 +460,18 @@ class FrameBroadcaster:
                     "age_seconds": None if age_seconds is None else round(age_seconds, 3),
                     "source_updated_at": entry["source_updated_at"],
                     "frame_count": self.frame_counts.get(camera_id, 0),
+                    "inference_frame_count": self.inference_counts.get(
+                        camera_id, 0
+                    ),
+                    "inference_source_updated_at": self.latest_detections[
+                        camera_id
+                    ]["updated_at"],
+                    "inference_fresh": inference_fresh,
+                    "inference_age_seconds": (
+                        None
+                        if inference_age_seconds is None
+                        else round(inference_age_seconds, 3)
+                    ),
                     "last_error": sanitize_source_error(entry["last_error"]),
                     "reconnect_attempts": entry["reconnect_attempts"],
                     "media_clock_status": entry["media_clock_status"],
@@ -429,6 +484,7 @@ class FrameBroadcaster:
                 "media_clock_ready": media_clock_ready,
                 "generated_at": utc_iso(),
                 "stale_after_seconds": self.stale_seconds,
+                "inference_stale_after_seconds": self.inference_stale_seconds,
                 "cameras": cameras,
                 "frames": dict(self.frame_counts),
             }
@@ -1825,6 +1881,9 @@ if __name__ == "__main__":
             camera_ids,
             jpeg_quality=env_float("V2X_PERCEPTION_JPEG_QUALITY", 80),
             stale_seconds=env_float("V2X_PERCEPTION_STALE_SECONDS", 15.0),
+            inference_stale_seconds=env_float(
+                "V2X_PERCEPTION_INFERENCE_STALE_SECONDS", 10.0
+            ),
         )
         stream_server = PerceptionHttpServer(stream_host, int(stream_port), stream_broadcaster)
         stream_server.start()
