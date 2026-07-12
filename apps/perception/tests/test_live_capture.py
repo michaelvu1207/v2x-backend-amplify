@@ -214,6 +214,44 @@ class LiveStreamReaderTests(unittest.TestCase):
                         terminal_read_failover_seconds=invalid,
                     )
 
+    def test_failed_terminal_hot_failover_does_not_spin_session_mints(self):
+        source_calls = []
+        captures = []
+        reconnecting = threading.Event()
+
+        def source_factory():
+            source_calls.append(f"signed-session-{len(source_calls) + 1}")
+            return source_calls[-1]
+
+        def capture_factory(_source):
+            capture = ScriptedCapture(
+                ["primary"] if not captures else []
+            )
+            captures.append(capture)
+            return capture
+
+        def state_callback(**event):
+            if event["state"] == "reconnecting":
+                reconnecting.set()
+
+        reader = LiveStreamReader(
+            source_factory=source_factory,
+            capture_factory=capture_factory,
+            recovery=StreamRecovery(1.0, 1.0),
+            state_callback=state_callback,
+            terminal_read_failover_seconds=0.5,
+        )
+        reader.start()
+        try:
+            self.assertIsNotNone(reader.wait_for_frame(0, timeout=1.0))
+            self.assertTrue(reconnecting.wait(1.0))
+            self.assertEqual(source_calls, [
+                "signed-session-1",
+                "signed-session-2",
+            ])
+        finally:
+            reader.stop(timeout=2.0)
+
     def test_proactive_renewal_rotates_source_without_reconnecting_state(self):
         source_calls = []
         states = []

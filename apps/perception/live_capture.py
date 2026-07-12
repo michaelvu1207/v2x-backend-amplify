@@ -495,14 +495,23 @@ class LiveStreamReader:
 
         deadline = self.monotonic() + self.terminal_read_failover_seconds
         candidate = preparation or self._prepare_replacement_capture()
+        # If an already-running proactive preparation fails at the same moment
+        # as the active reader, permit one clean connection-local attempt. If
+        # the terminal read itself started the preparation, never spin on fast
+        # source failures and overload the session-mint API.
+        may_start_fresh_attempt = preparation is not None
         while not self._stop_event.is_set():
             done, result, failed = candidate.poll()
             if done:
                 if not failed and result is not None:
                     return candidate.take()
                 candidate.discard()
-                if self.monotonic() >= deadline:
+                if (
+                    not may_start_fresh_attempt
+                    or self.monotonic() >= deadline
+                ):
                     return None
+                may_start_fresh_attempt = False
                 candidate = self._prepare_replacement_capture()
                 continue
 
