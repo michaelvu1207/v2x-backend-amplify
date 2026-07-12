@@ -1081,6 +1081,7 @@ class MultiCameraPipeline:
 
             while True:
                 frames_to_process = [None] * num_cams
+                pending_live_sequences = [None] * num_cams
                 source_epochs = [None] * num_cams
                 source_monotonic = [None] * num_cams
                 frame_media_clocks = [None] * num_cams
@@ -1090,7 +1091,12 @@ class MultiCameraPipeline:
                         snapshot = reader.snapshot(live_sequences[i])
                         if snapshot is None:
                             continue
-                        live_sequences[i] = snapshot["sequence"]
+                        # Do not consume a live reader sequence until this
+                        # iteration survives the global inference throttle.
+                        # Advancing here permanently discarded every frame
+                        # that happened to arrive on a throttled iteration and
+                        # could phase-starve one camera for several seconds.
+                        pending_live_sequences[i] = snapshot["sequence"]
                         frames_to_process[i] = snapshot["frame"]
                         source_epochs[i] = snapshot["source_epoch"]
                         source_monotonic[i] = snapshot["source_monotonic"]
@@ -1126,6 +1132,11 @@ class MultiCameraPipeline:
 
                 if frame_count != 1 and frame_count % 2 != 0:
                     continue
+
+                if live_mode:
+                    for i, sequence in enumerate(pending_live_sequences):
+                        if sequence is not None:
+                            live_sequences[i] = sequence
 
                 raw_buffer = []
                 annotated_frames = []
