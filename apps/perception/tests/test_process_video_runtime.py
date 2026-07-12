@@ -376,6 +376,19 @@ class LivePipelineTimestampTests(unittest.TestCase):
         def join(self, _timeout):
             return None
 
+    class ThrottledFakeReader(FakeReader):
+        def snapshot(self, after_sequence):
+            self.snapshot_calls += 1
+            if after_sequence >= 3:
+                raise LivePipelineTimestampTests.StopPipeline()
+            sequence = after_sequence + 1
+            return {
+                "sequence": sequence,
+                "frame": np.full((8, 8, 3), sequence, dtype=np.uint8),
+                "source_epoch": 1_000.0 + sequence,
+                "source_monotonic": 500.0 + sequence,
+            }
+
     @patch("process_video.LiveStreamReader", FakeReader)
     def test_pipeline_uses_per_camera_capture_time_and_source_age(self):
         self.FakeReader.instances.clear()
@@ -409,6 +422,33 @@ class LivePipelineTimestampTests(unittest.TestCase):
         self.assertEqual(
             self.FakeReader.instances[0].kwargs["connection_max_age_seconds"],
             240.0,
+        )
+
+    @patch("process_video.LiveStreamReader", ThrottledFakeReader)
+    def test_live_throttle_does_not_consume_skipped_camera_sequence(self):
+        self.ThrottledFakeReader.instances.clear()
+        detector = self.FakeDetector()
+        pipeline = object.__new__(MultiCameraPipeline)
+        pipeline.detectors = [detector]
+        pipeline.all_clean_detections = []
+        pipeline.global_tracks = {}
+        pipeline.local_to_global = {}
+        pipeline.next_global_id = 0
+        pipeline.extractor = Mock()
+
+        with self.assertRaises(self.StopPipeline):
+            pipeline.process_streams(
+                ["v2x-backend-cam-ch1"],
+                show_live=False,
+                upload=False,
+                stream_broadcaster=FrameBroadcaster(["ch1"]),
+                camera_ids=["ch1"],
+            )
+
+        self.assertEqual(len(detector.event_times), 3)
+        self.assertEqual(
+            [round(epoch) for _timestamp, epoch in detector.event_times],
+            [1_001, 1_002, 1_003],
         )
 
 
