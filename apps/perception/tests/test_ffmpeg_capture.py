@@ -1240,7 +1240,7 @@ class FfmpegCaptureTests(unittest.TestCase):
             disable_thread.join(1.0)
             mediator.close()
 
-    def test_discontinuity_disables_evidence_without_blocking_decode(self):
+    def test_affine_discontinuity_marker_remains_exact(self):
         source = "https://example.test/master.m3u8?SessionToken=master"
         master = (
             "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n"
@@ -1252,7 +1252,11 @@ class FfmpegCaptureTests(unittest.TestCase):
             "#EXT-X-DISCONTINUITY\n"
             "#EXT-X-PROGRAM-DATE-TIME:2026-07-10T03:57:23.000Z\n"
             "#EXTINF:2.0,\n"
-            "segment.mp4?FragmentNumber=frag-123&SessionToken=segment\n"
+            "segment-1.mp4?FragmentNumber=frag-123&SessionToken=segment\n"
+            "#EXT-X-DISCONTINUITY\n"
+            "#EXT-X-PROGRAM-DATE-TIME:2026-07-10T03:57:25.000Z\n"
+            "#EXTINF:2.0,\n"
+            "segment-2.mp4?FragmentNumber=frag-124&SessionToken=segment\n"
         )
 
         def get(url, timeout):
@@ -1260,15 +1264,27 @@ class FfmpegCaptureTests(unittest.TestCase):
                 return Response(text=media, url=url)
             if "init.mp4" in url:
                 return Response(content=b"exact-init", url=url)
-            if "segment.mp4" in url:
-                return Response(content=b"exact-segment", url=url)
+            if "segment-1.mp4" in url:
+                return Response(content=b"exact-segment-1", url=url)
+            if "segment-2.mp4" in url:
+                return Response(content=b"exact-segment-2", url=url)
             raise AssertionError("unexpected URL")
 
-        def forbidden_probe(*_args):
-            raise AssertionError("discontinuous transport was probed")
+        def probe(_init, segment):
+            if segment == b"exact-segment-1":
+                return (
+                    _PacketSample(0, Fraction(1, 10), Fraction(1, 1000)),
+                    _PacketSample(1, Fraction(19, 10), Fraction(1, 1000)),
+                )
+            if segment == b"exact-segment-2":
+                return (
+                    _PacketSample(0, Fraction(21, 10), Fraction(1, 1000)),
+                    _PacketSample(1, Fraction(39, 10), Fraction(1, 1000)),
+                )
+            raise AssertionError("unexpected segment")
 
         mediator = _LoopbackHlsMediator(
-            source, master, http_get=get, packet_probe=forbidden_probe
+            source, master, http_get=get, packet_probe=probe
         )
         try:
             local_media = next(
@@ -1278,16 +1294,56 @@ class FfmpegCaptureTests(unittest.TestCase):
             rewritten = requests.get(local_media, timeout=2).text
             self.assertIn("#EXT-X-DISCONTINUITY", rewritten)
             init_url = re.search(r'URI="([^"]+)"', rewritten).group(1)
-            segment_url = next(
+            segment_urls = [
                 line for line in rewritten.splitlines()
                 if line.startswith("http://") and line != init_url
-            )
+            ]
+            self.assertEqual(len(segment_urls), 2)
             self.assertEqual(requests.get(init_url, timeout=2).status_code, 200)
-            segment = requests.get(segment_url, timeout=2)
-            self.assertEqual(segment.status_code, 200)
-            self.assertEqual(segment.content, b"exact-segment")
+            for segment_url in segment_urls:
+                self.assertEqual(
+                    requests.get(segment_url, timeout=2).status_code, 200
+                )
+            self.assertTrue(mediator._transport_evidence_enabled)
+            self.assertEqual(
+                mediator.clock.metadata_at(2100.0)["media_timestamp_utc"],
+                "2026-07-10T03:57:25.000Z",
+            )
+            self.assertEqual(
+                mediator.transport_diagnostic(2100.0), "matched"
+            )
+        finally:
+            mediator.close()
+
+        misaligned_media = media.replace("03:57:25.000Z", "03:57:25.005Z")
+
+        def get_misaligned(url, timeout):
+            if "media.m3u8" in url:
+                return Response(text=misaligned_media, url=url)
+            return get(url, timeout)
+
+        mediator = _LoopbackHlsMediator(
+            source, master, http_get=get_misaligned, packet_probe=probe
+        )
+        try:
+            local_media = next(
+                line for line in mediator.master.decode().splitlines()
+                if line.startswith("http://")
+            )
+            rewritten = requests.get(local_media, timeout=2).text
+            init_url = re.search(r'URI="([^"]+)"', rewritten).group(1)
+            segment_urls = [
+                line for line in rewritten.splitlines()
+                if line.startswith("http://") and line != init_url
+            ]
+            requests.get(init_url, timeout=2).raise_for_status()
+            for segment_url in segment_urls:
+                requests.get(segment_url, timeout=2).raise_for_status()
             self.assertFalse(mediator._transport_evidence_enabled)
-            self.assertIsNone(mediator.clock.metadata_at(100.0))
+            self.assertEqual(
+                mediator.transport_diagnostic(2100.0),
+                "fragment_clock_rejected",
+            )
         finally:
             mediator.close()
 

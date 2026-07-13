@@ -9,15 +9,41 @@ Treat this file as an operating procedure, not proof of current state. Re-run th
 
 ## Newest perception release chronology
 
-Observed through 2026-07-13 12:22 UTC; verify rather than assume. These items
+Observed through 2026-07-13 12:52 UTC; verify rather than assume. These items
 override every older PR 32/candidate statement below.
 
-- Canonical `origin/main` is now PR 45 merge
-  `3ad755a9a33e0efaf6226d78634a1899e7dbe226`. PR 45 is not deployed. Live
+- Canonical `origin/main` is now PR 46 merge
+  `f5ae049ed8b7413e32c5331b275021281956b056`. PR 46 is not deployed. Live
   production remains the exact, detached, clean PR 35 rollback
   `76e561cd41d070a6402c39c98847e646bd81cc9a`, with its original upload
   environment and timers restored. Do not describe PR 42, PR 43, or the
   same-session PTS follow-up below as production.
+- PR 46's first candidate window is rejected before readiness. Evidence is at
+  `/home/path/V2XCarla/v2x-evidence/perception/20260713T123958Z-pr46-premux-pts-canary/`
+  and rollback is
+  `/home/path/V2XCarla/v2x-backend-backups/v2x-rollback-20260713T123958Z-pr46-premux-pts/`.
+  The pre-mux stats parser did not fail; instead all four captures exposed the
+  finite reason `discontinuity`. The marker persisted across replacement
+  sessions, so the candidate was stopped early and exact PR 35 was restored by
+  12:42:28 UTC with every timer active. CARLA, Drive, and web did not restart.
+- The PR 46 discontinuity rejection is a false positive proven from retained
+  Kinesis media around the canary. ON_DEMAND playlists marked essentially every
+  adjacent fragment discontinuous, but for six consecutive fragments on each
+  of ch1-ch4, measured `PDT - first packet PTS` had exactly 0.000 ms drift from
+  the frozen affine origin. The current source-only branch is
+  `codex/v2x-affine-discontinuity` on PR 46 main. It preserves the advisory tag
+  for FFmpeg but trusts only the already strict raw-fragment affine validation
+  plus exact emitted pre-mux PTS lookup; a true reset still becomes
+  `fragment_clock_rejected`. An archived marked-session decode returned strict
+  increasing exact PTS with no diagnostics on all four cameras (180 frames on
+  ch1-ch3, 155 on ch4); ch4 safely removed 25 replay frames. Full perception
+  remains 218 passing tests plus syntax/diff checks. Twenty real live-session
+  open/read/close cycles all stayed matched, returned the process to exactly
+  four file descriptors with zero new threads, killed every child, exposed no
+  remote/signed source in argv, and left production at four FFmpeg readers with
+  4,007 MiB GPU free. This follow-up is not
+  merged or deployed and requires independent re-review and the unchanged
+  rollback-gated canary.
 - PR 45 fixed the valid KVS preroll rejection and added finite transport
   diagnostics, but its first real upload-disabled canary is also rejected.
   Evidence is at
@@ -33,8 +59,7 @@ override every older PR 32/candidate statement below.
 - The second root cause is now exact. FFmpeg 6.1.1 clamps backward preroll PTS
   at the framecrc/NUT mux boundary: a real ch2 run repeated `16.006` seconds,
   while a pre-mux `showinfo` probe proved the decoded PTS moved from `6.273`
-  back to `5.494` seconds. The current source-only branch is
-  `codex/v2x-premux-pts` on PR 45 main. It replaces the split/2x2/framecrc
+  back to `5.494` seconds. PR 46's merged source replaces the split/2x2/framecrc
   branch with FFmpeg's dedicated numeric-only `-stats_enc_pre` pipe, strictly
   validates output/input frame identity and rational PTS, permits only the
   already affine-validated backward preroll, and drops replay frames until PTS
@@ -42,10 +67,9 @@ override every older PR 32/candidate statement below.
   signed source remains out of argv/disk. A real standalone ch2 capture returned
   700 strict-increasing trusted frames, safely dropped 25 overlap frames, kept
   every diagnostic matched, and retained at least 3,358 MiB free GPU. The
-  focused suite passes 119 tests and full perception passes 218 plus syntax and
-  diff checks. This source is not merged or deployed; it still requires
-  independent re-review, canonical merge, and the unchanged rollback-gated
-  four-camera canary.
+  focused suite passed 119 tests and full perception passed 218 plus syntax and
+  diff checks. The newer rejected PR 46 canary and affine-discontinuity
+  follow-up above supersede that source-only verdict.
 - PR 44's first real zero-overlap NVDEC canary is rejected. Evidence is at
   `/home/path/V2XCarla/v2x-evidence/perception/20260713T103200Z-pr44-same-session-pts-canary/`
   and the verified rollback is

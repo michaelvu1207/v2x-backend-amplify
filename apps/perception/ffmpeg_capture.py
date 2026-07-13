@@ -1478,11 +1478,11 @@ class _LoopbackHlsMediator:
             except UnicodeDecodeError as exc:
                 raise NvdecCaptureError("HLS media response is not UTF-8") from exc
             fragments = _parse_media_playlist(self._media_url, text)
-            if any(
-                line.strip() == "#EXT-X-DISCONTINUITY"
-                for line in text.splitlines()
-            ):
-                self._disable_transport_evidence("discontinuity")
+            # KVS can mark every adjacent fragment discontinuous even when the
+            # measured packet PTS/PDT affine origin is identical. Preserve the
+            # marker for FFmpeg, but let SameSessionTransportClock validate the
+            # actual fragment evidence. A real reset or drift still clears the
+            # clock, and an emitted pre-mux PTS is trusted only on exact lookup.
             return 200, "application/vnd.apple.mpegurl", self._rewrite_media(
                 fragments
             )
