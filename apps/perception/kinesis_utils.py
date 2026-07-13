@@ -6,7 +6,6 @@ import inspect
 import os
 import re
 import tempfile
-import threading
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import boto3
@@ -17,30 +16,20 @@ from ffmpeg_capture import (
     build_nvdec_frame_identity,
     match_fragment_frame_nvdec,
 )
+from decoder_admission import acquire_auxiliary_decoder_slot
 
 load_dotenv()
 
 
-# Bound exact-fragment GPU work across all camera clock threads. During one
-# staggered hot handover the process owns four active readers and one prepared
-# reader; two match workers cap the total at seven decoder sessions. The prior
-# eight-session peak intermittently starved active readers long enough to trip
-# the unchanged 15-second freshness gate. Exact matching still covers every
-# fragment; the smaller pool changes scheduling only, not clock evidence.
+# Two workers preserve the measured exact-fragment recovery latency. Admission
+# is enforced separately by the shared auxiliary GPU budget: cold/terminal work
+# may use both permits, while a proactive capture holds one permit through
+# handover and leaves one for its own exact match.
 _NVDEC_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
-# Terminal recovery must not wait behind proactive four-camera clock work. A
-# terminal reader has already lost its live decoder, so two reserved exact-match
-# workers run only off the steady-state path while proactive preparations remain
-# serialized. They use the same matcher and ambiguity gate as the normal pool.
+# A separate executor prevents urgent futures from queueing behind normal work;
+# priority-aware auxiliary admission also lets an urgent waiter enter before any
+# queued normal matcher when a permit is released.
 _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
-# Normal and urgent pools keep terminal work from queueing behind proactive
-# work, but both must share one hard decoder envelope. This prevents a normal
-# exact-clock match and an urgent terminal match from creating concurrent
-# fragment decoders beside the four live readers. One additional decoder keeps
-# the measured production GPU floor above the fixed rollback threshold while
-# preserving priority through the separate urgent executor. Acquisition remains
-# cancellable so discarded preparations cannot wait indefinitely for a slot.
-_NVDEC_FRAGMENT_MATCH_SLOTS = threading.BoundedSemaphore(value=1)
 
 
 def shutdown_media_clock_executors():
@@ -52,21 +41,21 @@ def shutdown_media_clock_executors():
 
 
 def _run_nvdec_fragment_match(
-    fragment_matcher, args, kwargs, cancel_event=None
+    fragment_matcher, args, kwargs, cancel_event=None, urgent=False
 ):
-    """Run one exact fragment decoder inside the process-wide NVDEC cap."""
-    acquired = False
+    """Run one exact fragment decoder inside the shared auxiliary GPU budget."""
+    lease = acquire_auxiliary_decoder_slot(
+        urgent=urgent,
+        cancelled=(
+            None if cancel_event is None else cancel_event.is_set
+        ),
+    )
     try:
-        while not acquired:
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("HLS media clock resolution cancelled")
-            acquired = _NVDEC_FRAGMENT_MATCH_SLOTS.acquire(timeout=0.05)
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("HLS media clock resolution cancelled")
         return fragment_matcher(*args, **kwargs)
     finally:
-        if acquired:
-            _NVDEC_FRAGMENT_MATCH_SLOTS.release()
+        lease.release()
 
 
 def _utc_iso(epoch):
@@ -421,6 +410,7 @@ def resolve_hls_media_clock(
                 args,
                 kwargs,
                 cancel_event=cancel_event,
+                urgent=urgent,
             )
         else:
             frame_offset = fragment_matcher(*args, **kwargs)
@@ -435,9 +425,10 @@ def resolve_hls_media_clock(
         and fragment_matcher is match_fragment_frame_nvdec
     ):
         # A live process already owns one NVDEC session per camera. Fetch the
-        # bounded fragment window concurrently, then decode candidates one at
-        # a time so four cameras cannot burst into 20 additional GPU decoder
-        # sessions during a clock re-anchor.
+        # bounded fragment window concurrently, then let the shared admission
+        # budget decode at most two candidates across every camera and pool.
+        # A terminal recovery holds an urgent window across its whole batch, so
+        # normal clock work cannot slip between later urgent candidates.
         with ThreadPoolExecutor(max_workers=min(5, len(fragments))) as executor:
             downloaded = list(executor.map(download_fragment, fragments))
         match_executor = (

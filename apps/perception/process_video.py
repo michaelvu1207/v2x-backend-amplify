@@ -15,7 +15,12 @@ import requests
 import tracking_utils
 import kinesis_utils
 from ffmpeg_capture import FfmpegNvdecCapture
-from live_capture import LiveStreamReader
+from decoder_admission import AUXILIARY_DECODER_ADMISSION
+from live_capture import (
+    LiveStreamReader,
+    capture_preparation_topology,
+    wait_for_terminal_cleanups,
+)
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import radians, cos, sin, asin, sqrt
@@ -564,6 +569,8 @@ class FrameBroadcaster:
                     "media_time_trusted": entry["media_time_trusted"],
                     "decode_latency_ms": entry["decode_latency_ms"],
                 }
+            decoder_topology = AUXILIARY_DECODER_ADMISSION.snapshot()
+            decoder_topology.update(capture_preparation_topology())
             return {
                 "status": "ok" if ready else "degraded",
                 "ready": ready,
@@ -571,6 +578,7 @@ class FrameBroadcaster:
                 "generated_at": utc_iso(),
                 "stale_after_seconds": self.stale_seconds,
                 "inference_stale_after_seconds": self.inference_stale_seconds,
+                "decoder_topology": decoder_topology,
                 "cameras": cameras,
                 "frames": dict(self.frame_counts),
             }
@@ -1282,6 +1290,9 @@ class MultiCameraPipeline:
                     terminal_read_failover_seconds=(
                         terminal_read_failover_seconds
                     ),
+                    reserve_proactive_decoder_slot=(
+                        capture_backend == "ffmpeg_nvdec"
+                    ),
                 )
                 live_readers.append(reader)
         else:
@@ -1544,6 +1555,11 @@ class MultiCameraPipeline:
             )
             for reader in live_readers:
                 reader.join(max(0.0, stop_deadline - time.monotonic()))
+            for reader in live_readers:
+                if reader.is_alive():
+                    reader.join()
+            if not wait_for_terminal_cleanups():
+                raise RuntimeError("terminal decoder cleanup failed")
             for cap in caps:
                 if cap is not None:
                     cap.release()

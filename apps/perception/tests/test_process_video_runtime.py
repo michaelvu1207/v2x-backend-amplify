@@ -1,5 +1,6 @@
 import sys
 import copy
+import os
 from pathlib import Path
 import threading
 import unittest
@@ -57,6 +58,16 @@ class FrameBroadcasterTests(unittest.TestCase):
         self.assertEqual(
             health["cameras"]["ch1"]["inference_frame_count"], 1
         )
+        self.assertEqual(health["decoder_topology"], {
+            "capacity": 2,
+            "in_use": 0,
+            "urgent_waiters": 0,
+            "urgent_windows": 0,
+            "proactive_preparations": 0,
+            "terminal_recoveries": 0,
+            "terminal_cleanups": 0,
+            "terminal_cleanup_failures": 0,
+        })
 
     def test_health_fails_closed_when_inference_stalls_behind_capture(self):
         broadcaster = FrameBroadcaster(
@@ -514,9 +525,12 @@ class LivePipelineTimestampTests(unittest.TestCase):
             self.stop_requested = True
             return None
 
-        def join(self, _timeout):
+        def join(self, _timeout=None):
             self.joined = True
             return None
+
+        def is_alive(self):
+            return False
 
     class ThrottledFakeReader(FakeReader):
         def snapshot(self, after_sequence):
@@ -557,20 +571,69 @@ class LivePipelineTimestampTests(unittest.TestCase):
         shutdown = threading.Event()
         shutdown.set()
 
-        pipeline.process_streams(
-            ["v2x-backend-cam-ch1"],
-            show_live=False,
-            upload=False,
-            stream_broadcaster=FrameBroadcaster(["ch1"]),
-            camera_ids=["ch1"],
-            shutdown_event=shutdown,
-        )
+        with patch.dict(
+            os.environ,
+            {"V2X_PERCEPTION_CAPTURE_BACKEND": "ffmpeg_nvdec"},
+        ):
+            pipeline.process_streams(
+                ["v2x-backend-cam-ch1"],
+                show_live=False,
+                upload=False,
+                stream_broadcaster=FrameBroadcaster(["ch1"]),
+                camera_ids=["ch1"],
+                shutdown_event=shutdown,
+            )
 
         self.assertEqual(len(self.FakeReader.instances), 1)
         reader = self.FakeReader.instances[0]
         self.assertEqual(reader.snapshot_calls, 0)
         self.assertTrue(reader.stop_requested)
         self.assertTrue(reader.joined)
+        self.assertTrue(reader.kwargs["reserve_proactive_decoder_slot"])
+
+    def test_pipeline_shutdown_waits_past_soft_deadline_for_reader_death(self):
+        class LingeringReader(self.FakeReader):
+            instances = []
+
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.alive = True
+                self.join_timeouts = []
+
+            def join(self, timeout=None):
+                self.join_timeouts.append(timeout)
+                if timeout is None:
+                    self.alive = False
+                self.joined = True
+
+            def is_alive(self):
+                return self.alive
+
+        pipeline = object.__new__(MultiCameraPipeline)
+        pipeline.detectors = [self.FakeDetector()]
+        pipeline.all_clean_detections = []
+        pipeline.global_tracks = {}
+        pipeline.local_to_global = {}
+        pipeline.next_global_id = 0
+        pipeline.extractor = Mock()
+        shutdown = threading.Event()
+        shutdown.set()
+
+        with patch("process_video.LiveStreamReader", LingeringReader):
+            pipeline.process_streams(
+                ["v2x-backend-cam-ch1"],
+                show_live=False,
+                upload=False,
+                stream_broadcaster=FrameBroadcaster(["ch1"]),
+                camera_ids=["ch1"],
+                shutdown_event=shutdown,
+            )
+
+        reader = LingeringReader.instances[0]
+        self.assertGreaterEqual(len(reader.join_timeouts), 2)
+        self.assertIsNotNone(reader.join_timeouts[0])
+        self.assertIsNone(reader.join_timeouts[-1])
+        self.assertFalse(reader.is_alive())
 
     @patch("process_video.LiveStreamReader", FakeReader)
     def test_pipeline_uses_per_camera_capture_time_and_source_age(self):

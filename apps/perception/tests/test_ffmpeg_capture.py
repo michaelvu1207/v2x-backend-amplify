@@ -1,7 +1,9 @@
 import sys
 from pathlib import Path
+import subprocess
 import threading
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -10,6 +12,7 @@ PERCEPTION_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PERCEPTION_DIR))
 
 from ffmpeg_capture import (  # noqa: E402
+    FfmpegNvdecCapture,
     NvdecCaptureError,
     build_nvdec_frame_identity,
     build_nvdec_command,
@@ -42,6 +45,95 @@ class FakeCapture:
 
 
 class FfmpegCaptureTests(unittest.TestCase):
+    def test_release_fails_closed_and_retains_a_surviving_process(self):
+        class SurvivingProcess:
+            pid = 12345
+
+            def __init__(self):
+                self.waits = []
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                self.waits.append(timeout)
+                raise subprocess.TimeoutExpired("ffmpeg", timeout)
+
+        class TemporaryDirectory:
+            def __init__(self):
+                self.cleaned = False
+
+            def cleanup(self):
+                self.cleaned = True
+
+        process = SurvivingProcess()
+        temporary = TemporaryDirectory()
+        capture = object.__new__(FfmpegNvdecCapture)
+        capture._cancel_watcher_stop = threading.Event()
+        capture._opened = True
+        capture._capture = None
+        capture._process_lock = threading.RLock()
+        capture._process = process
+        capture._memfd = None
+        capture._temporary_directory = temporary
+        capture._cancel_watcher = None
+
+        with patch("ffmpeg_capture.os.killpg") as killpg:
+            with self.assertRaisesRegex(
+                NvdecCaptureError, "process did not exit"
+            ):
+                capture.release()
+
+        self.assertIs(capture._process, process)
+        self.assertFalse(temporary.cleaned)
+        self.assertEqual(process.waits, [3, 3])
+        self.assertEqual(killpg.call_count, 2)
+
+    def test_capture_release_error_does_not_skip_child_termination(self):
+        class BrokenCapture:
+            def release(self):
+                raise RuntimeError("synthetic OpenCV release failure")
+
+        class TerminatingProcess:
+            pid = 12345
+
+            def __init__(self):
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout):
+                self.returncode = 0
+                return 0
+
+        class TemporaryDirectory:
+            def __init__(self):
+                self.cleaned = False
+
+            def cleanup(self):
+                self.cleaned = True
+
+        process = TerminatingProcess()
+        temporary = TemporaryDirectory()
+        capture = object.__new__(FfmpegNvdecCapture)
+        capture._cancel_watcher_stop = threading.Event()
+        capture._opened = True
+        capture._capture = BrokenCapture()
+        capture._process_lock = threading.RLock()
+        capture._process = process
+        capture._memfd = None
+        capture._temporary_directory = temporary
+        capture._cancel_watcher = None
+
+        with patch("ffmpeg_capture.os.killpg") as killpg:
+            with self.assertRaisesRegex(RuntimeError, "OpenCV release"):
+                capture.release()
+
+        killpg.assert_called_once()
+        self.assertIsNone(capture._process)
+        self.assertTrue(temporary.cleaned)
+
     def test_master_is_rewritten_same_origin_without_command_line_url(self):
         source = "https://example.test/master.m3u8?token=secret"
         master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nmedia.m3u8?child=secret\n"

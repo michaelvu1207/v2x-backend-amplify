@@ -19,6 +19,11 @@ from kinesis_utils import (  # noqa: E402
     resolve_hls_media_clock,
 )
 import kinesis_utils  # noqa: E402
+from decoder_admission import (  # noqa: E402
+    AUXILIARY_DECODER_ADMISSION,
+    acquire_auxiliary_decoder_slot,
+    begin_urgent_decoder_window,
+)
 
 
 class Response:
@@ -57,7 +62,7 @@ class HlsMediaClockTests(unittest.TestCase):
             ))
 
         self.assertEqual(results, list(range(6)))
-        self.assertEqual(maximum_active, 1)
+        self.assertEqual(maximum_active, 2)
 
     def test_normal_and_urgent_executors_share_the_same_decoder_cap(self):
         lock = threading.Lock()
@@ -88,20 +93,118 @@ class HlsMediaClockTests(unittest.TestCase):
                 matcher,
                 (value,),
                 {},
+                None,
+                bool(value % 2),
             ))
 
         self.assertEqual(
             [future.result(timeout=2.0) for future in futures],
             list(range(6)),
         )
-        self.assertEqual(maximum_active, 1)
+        self.assertEqual(maximum_active, 2)
+
+    def test_urgent_matcher_precedes_queued_normal_matchers(self):
+        manual = acquire_auxiliary_decoder_slot()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        order = []
+        lock = threading.Lock()
+
+        def matcher(label):
+            with lock:
+                order.append(label)
+            if label == "normal-0":
+                first_started.set()
+                release_first.wait(2.0)
+            return label
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(
+                _run_nvdec_fragment_match,
+                matcher,
+                (f"normal-{index}",),
+                {},
+            ) for index in range(4)]
+            self.assertTrue(first_started.wait(1.0))
+            urgent = executor.submit(
+                _run_nvdec_fragment_match,
+                matcher,
+                ("urgent",),
+                {},
+                None,
+                True,
+            )
+            self.assertTrue(self._wait_until(
+                lambda: AUXILIARY_DECODER_ADMISSION.snapshot()[
+                    "urgent_waiters"
+                ] == 1
+            ))
+            release_first.set()
+            self.assertEqual(urgent.result(timeout=1.0), "urgent")
+            manual.release()
+            self.assertEqual(
+                [future.result(timeout=1.0) for future in futures],
+                [f"normal-{index}" for index in range(4)],
+            )
+
+        self.assertEqual(order[:2], ["normal-0", "urgent"])
+
+    def test_urgent_window_keeps_normal_work_out_between_batch_items(self):
+        window = begin_urgent_decoder_window()
+        leases = [
+            acquire_auxiliary_decoder_slot(urgent=True),
+            acquire_auxiliary_decoder_slot(urgent=True),
+        ]
+        normal_acquired = threading.Event()
+
+        def acquire_normal():
+            lease = acquire_auxiliary_decoder_slot()
+            normal_acquired.set()
+            return lease
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            normal_future = executor.submit(acquire_normal)
+            try:
+                leases.pop().release()
+                urgent_future = executor.submit(
+                    acquire_auxiliary_decoder_slot, urgent=True
+                )
+                urgent_lease = urgent_future.result(timeout=1.0)
+                self.assertFalse(normal_acquired.wait(0.05))
+                urgent_lease.release()
+            finally:
+                for lease in leases:
+                    lease.release()
+                window.release()
+            normal_lease = normal_future.result(timeout=1.0)
+            normal_lease.release()
+
+        self.assertTrue(normal_acquired.is_set())
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["urgent_windows"], 0
+        )
+
+    @staticmethod
+    def _wait_until(predicate, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return predicate()
 
     def test_nvdec_fragment_admission_cancels_while_waiting(self):
-        first_started = threading.Event()
+        started = 0
+        started_lock = threading.Lock()
+        both_started = threading.Event()
         release_first = threading.Event()
 
         def blocker(value):
-            first_started.set()
+            nonlocal started
+            with started_lock:
+                started += 1
+                if started == 2:
+                    both_started.set()
             release_first.wait(2.0)
             return value
 
@@ -112,7 +215,13 @@ class HlsMediaClockTests(unittest.TestCase):
                 ("one",),
                 {},
             )
-            self.assertTrue(first_started.wait(1.0))
+            other = executor.submit(
+                _run_nvdec_fragment_match,
+                blocker,
+                ("two",),
+                {},
+            )
+            self.assertTrue(both_started.wait(1.0))
             cancelled = threading.Event()
             second = executor.submit(
                 _run_nvdec_fragment_match,
@@ -126,6 +235,17 @@ class HlsMediaClockTests(unittest.TestCase):
                 second.result(timeout=1.0)
             release_first.set()
             self.assertEqual(first.result(timeout=1.0), "one")
+            self.assertEqual(other.result(timeout=1.0), "two")
+
+    def test_active_matcher_exception_releases_auxiliary_permit(self):
+        def fail():
+            raise ValueError("synthetic matcher failure")
+
+        with self.assertRaisesRegex(ValueError, "synthetic"):
+            _run_nvdec_fragment_match(fail, (), {})
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 0
+        )
 
     def test_executor_shutdown_completes_in_fresh_subprocess(self):
         code = """
