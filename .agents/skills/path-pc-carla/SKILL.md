@@ -9,8 +9,71 @@ Treat this file as an operating procedure, not proof of current state. Re-run th
 
 ## Newest perception release chronology
 
-Observed through 2026-07-13 00:26 UTC; verify rather than assume. These items
+Observed through 2026-07-13 03:29 UTC; verify rather than assume. These items
 override every older PR 32/candidate statement below.
+
+- Live production remains the verified PR 35 rollback
+  `76e561cd41d070a6402c39c98847e646bd81cc9a`. At 03:23 UTC every production
+  perception reader had been stuck in `reconnecting` since about 01:34 UTC
+  while five FFmpeg children remained alive. A zero-session, perception-only
+  restart restored all four trusted feeds and the four-feed verifier at 03:25
+  UTC, but PR 35 required its full 60-second stop timeout and SIGKILL cleanup.
+  Treat this as a retained terminal-reader and shutdown failure, not a release
+  pass. Do not describe PR 37 or any later recovery candidate as deployed.
+- Production CARLA had a real Vulkan out-of-memory crash at 03:15:39 UTC and
+  systemd recovered it at 03:15:50 UTC; the current CARLA restart counter is
+  therefore one. The crash coincided with repeated isolated NVDEC canaries, but
+  causality is not proven. Concurrent four-camera GPU canaries are prohibited
+  until a separate GPU-budget proof exists, regardless of sampled headroom.
+  The only allowed next gate is an in-place, zero-overlap perception replacement
+  with a pre/post CARLA fingerprint; abort on any additional restart,
+  Vulkan/OOM signature, or less than 3 GiB free.
+- The newest isolated terminal-recovery candidate is
+  `90b40441bbb7d0f6cb27d615cca1eefab8fd587b`. It retains signed capture and
+  clock URLs only inside one reader, exposes secret-safe stage/evidence
+  telemetry, and never accepts a prior decoder cursor or prior clock as a new
+  anchor. A same-session restart must match a unique contiguous sequence of
+  three distinct exact full-frame identities with decoder-time delta agreement
+  within 1 ms, or obtain one unique exact match from the bounded HLS fragment
+  window. Missing, duplicate, cancelled, late, or validator-rejected evidence
+  fails closed. Discard propagates through HTTP, fragment matching, and FFmpeg;
+  SIGTERM stops readers cooperatively; HTTP worker threads are daemonized; and
+  the URL-free fragment executors are explicitly quiesced on shutdown. Normal
+  and urgent exact-match pools share one cancellable two-decoder admission cap,
+  so overlapping clock work cannot add more than two fragment decoders beside
+  the four live readers. The tracked capture/clock fragment defaults are
+  two/four. No freshness, clock, inference, duplicate-frame, or zero-reconnect
+  threshold is weakened.
+- The last four-camera NVDEC recovery proof ran on functional failover commit
+  `791676c`: two sequential forced-reader cycles recovered ch1-ch4 eight times
+  with zero not-ready samples. Six recoveries used the exact three-frame
+  sequence and two used exact fragment matching; durations were
+  1.466-7.635 seconds, maximum decode latency was 4480.641 ms, capture and
+  inference advanced, and final readiness/media-clock readiness were true.
+  That transient service did not stop cleanly because it predates the final
+  cooperative shutdown changes, so it is recovery evidence only. Candidate
+  `90b4044` passes 154 perception, 241 Python-3.10 bridge, 23 recovery-
+  infrastructure, and 132 web tests plus zero Svelte diagnostics and the web
+  production build. A one-camera runtime attempt correctly exited because the
+  production pipeline requires one detector per configured source; do not
+  weaken that invariant or count the attempt as canary proof.
+- Candidate `49ac21b` and its PR49 single-frame ring proof are superseded and
+  rejected for release: one exact frame can be ambiguous in static imagery and
+  the prior-clock cursor shortcut was not independent re-anchor evidence. Keep
+  `/home/path/V2XCarla/v2x-evidence/perception/20260713T023600Z-pr49-exact-ring-terminal-canary/`
+  as historical evidence only. Before live replacement, require independent
+  final-code review, full regression, a fresh rollback bundle, zero Drive
+  sessions, bounded timer hold, and a GPU-safe replacement rather than a
+  concurrent four-camera canary. Then require upload-disabled and enabled
+  startup, clean shutdown rehearsal, ten-minute and 30-minute watches, a
+  natural hourly restart, and a fresh 24-hour monitor. Any failure restores PR
+  35 perception only.
+- Historical experiments `f76d493`, `d0802cc`, `b515e4b`, `7127779`,
+  `ec1cd2a`, `2e27521`, `4162e96`, `75c1cda`, and `0c73261` are rejected or
+  intermediate evidence, not deployment targets. Their forced canaries exposed
+  respectively late capture-open or clock-resolution paths, and some rejected
+  transient units required a process-group timeout during cleanup. Never cite
+  those partial successes as release proof.
 
 - PR 37 merged as canonical
   `80db3de34870379ddaa6984497607726a563a17d`. Its terminal-FIFO
@@ -42,6 +105,29 @@ override every older PR 32/candidate statement below.
   perception-only rollback at
   `/home/path/V2XCarla/v2x-evidence/perception/20260713T002445Z-pr37-live-monitor-24h/`.
   Do not call PR 37 accepted until that monitor reaches its terminal pass.
+  That first watch stopped at the natural 01:00 UTC hourly restart because its
+  harness treated systemd's normal `activating` state as inactive. Perception
+  remained healthy, the hourly restart completed Richmond/LIVE/zero-session
+  recovery, and no rollback occurred; this is rejected orchestration evidence.
+  After that harness check was corrected, a fresh watch at
+  `/home/path/V2XCarla/v2x-evidence/perception/20260713T010831Z-pr37-live-monitor-24h/`
+  found a real ch1 terminal `frame read failed` at sample 353. PR 37 did not
+  produce a trusted replacement inside its five-second bound, entered the
+  unchanged reconnect path, and the monitor automatically restored verified
+  PR 35 `76e561cd41d070a6402c39c98847e646bd81cc9a`. CARLA, Drive, web,
+  timers, and restart counters were preserved; the 01:14 UTC live state is
+  therefore PR 35, not PR 37. Do not restart the PR 37 acceptance clock.
+- Candidate `f76d493ebc2d38e8c4c0f70cac091f9c8024a377` increases only the
+  terminal replacement preparation bound from five to eight seconds, still
+  below the unchanged ten-second inference and 15-second freshness gates, and
+  exposes per-camera terminal-failover attempts, successes, failures, outcome,
+  and duration in `/health`. Missing or late trusted media clocks still fall
+  through to reconnect/staleness; no clock, freshness, decode-latency, or
+  zero-reconnect threshold is weakened. Verification passes 140 perception,
+  241 Python-3.10 bridge, and 23 recovery-infrastructure tests. Require an
+  upload-disabled isolated canary with forced terminal reader loss before any
+  controlled live deployment, followed by the full startup, ten-minute,
+  30-minute, natural-hourly, and fresh 24-hour gates.
 - PR 36 merged as canonical
   `edaae29e9c00b411137ba40b0fd546f4b7d3c33d`. It contains the
   fail-closed vehicle identity behavior described below. Controlled startup
@@ -1138,11 +1224,15 @@ perception CSVs contain only 4-7 local-XZ points per channel, no independent
 holdouts, no global landmark IDs, and internally inconsistent shared points;
 treat the current camera verifier as diagnostic only. Do not deploy pose, pole,
 FOV, or lens changes fitted from those rows. To create acceptance evidence,
-survey one shared pole pose and at least 12 globally identified CARLA-XYZ (or
-GPS) correspondences per channel, pre-split into at least eight fit points and
-four untouched holdouts spanning 50% of image width and 30% of height. Record
-the source frame hash and measured intrinsics/distortion. Then require held-out
-RMSE/P95/max of 75/125/175 pixels at 1280x960 and all four retained renders.
+measure each physical camera's intrinsics/distortion from at least ten accepted
+checkerboard/ChArUco fit images plus two untouched holdouts, independently
+survey the common map/site truth, and retain at least 12 globally identified
+correspondences per channel split into at least eight fit points and four
+untouched holdouts spanning 50% of image width and 30% of height. Record source
+frame, board, measurement, map, and render hashes. At 1280x960 require held-out
+point RMSE/P95/max at most 10/16/24 pixels and finite road-geometry RMSE/max at
+most 6/12 pixels for every camera, plus correct road/lane/crosswalk topology,
+horizon, vanishing directions, stable landmarks, and all four retained renders.
 
 Useful logs:
 

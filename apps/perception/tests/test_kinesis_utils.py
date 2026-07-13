@@ -1,6 +1,10 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+import subprocess
 import sys
 from pathlib import Path
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -9,10 +13,12 @@ PERCEPTION_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PERCEPTION_DIR))
 
 from kinesis_utils import (  # noqa: E402
+    _run_nvdec_fragment_match,
     get_kvs_hls_url,
     get_video_session_hls_url,
     resolve_hls_media_clock,
 )
+import kinesis_utils  # noqa: E402
 
 
 class Response:
@@ -25,6 +31,154 @@ class Response:
 
 
 class HlsMediaClockTests(unittest.TestCase):
+    def test_nvdec_fragment_admission_caps_normal_and_urgent_work_together(self):
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def matcher(value):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.05)
+                return value
+            finally:
+                with lock:
+                    active -= 1
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            results = list(executor.map(
+                lambda value: _run_nvdec_fragment_match(
+                    matcher, (value,), {}, cancel_event=threading.Event()
+                ),
+                range(6),
+            ))
+
+        self.assertEqual(results, list(range(6)))
+        self.assertEqual(maximum_active, 2)
+
+    def test_normal_and_urgent_executors_share_the_same_decoder_cap(self):
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def matcher(value):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.05)
+                return value
+            finally:
+                with lock:
+                    active -= 1
+
+        futures = []
+        for value in range(6):
+            executor = (
+                kinesis_utils._NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR
+                if value % 2
+                else kinesis_utils._NVDEC_FRAGMENT_MATCH_EXECUTOR
+            )
+            futures.append(executor.submit(
+                _run_nvdec_fragment_match,
+                matcher,
+                (value,),
+                {},
+            ))
+
+        self.assertEqual(
+            [future.result(timeout=2.0) for future in futures],
+            list(range(6)),
+        )
+        self.assertEqual(maximum_active, 2)
+
+    def test_nvdec_fragment_admission_cancels_while_waiting(self):
+        start_lock = threading.Lock()
+        started = 0
+        both_started = threading.Event()
+        release_first = threading.Event()
+
+        def blocker(value):
+            nonlocal started
+            with start_lock:
+                started += 1
+                if started == 2:
+                    both_started.set()
+            release_first.wait(2.0)
+            return value
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            first = executor.submit(
+                _run_nvdec_fragment_match,
+                blocker,
+                ("one",),
+                {},
+            )
+            second = executor.submit(
+                _run_nvdec_fragment_match,
+                blocker,
+                ("two",),
+                {},
+            )
+            self.assertTrue(both_started.wait(1.0))
+            cancelled = threading.Event()
+            third = executor.submit(
+                _run_nvdec_fragment_match,
+                lambda: self.fail("cancelled matcher ran"),
+                (),
+                {},
+                cancelled,
+            )
+            cancelled.set()
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                third.result(timeout=1.0)
+            release_first.set()
+            self.assertEqual(first.result(timeout=1.0), "one")
+            self.assertEqual(second.result(timeout=1.0), "two")
+
+    def test_executor_shutdown_completes_in_fresh_subprocess(self):
+        code = """
+import sys
+from concurrent.futures import ThreadPoolExecutor
+sys.path.insert(0, sys.argv[1])
+import kinesis_utils
+kinesis_utils.shutdown_media_clock_executors()
+kinesis_utils._NVDEC_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+kinesis_utils._NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+kinesis_utils._NVDEC_FRAGMENT_MATCH_EXECUTOR.submit(lambda: 1)
+kinesis_utils._NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR.submit(lambda: 2)
+kinesis_utils.shutdown_media_clock_executors()
+print("clean")
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code, str(PERCEPTION_DIR)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        self.assertEqual(completed.stdout.strip(), "clean")
+
+    def test_cancelled_resolution_does_not_request_a_signed_url(self):
+        cancelled = threading.Event()
+        cancelled.set()
+
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            resolve_hls_media_clock(
+                "https://example.invalid/media.m3u8?token=secret",
+                reference_frame="frame",
+                capture_position_milliseconds=0.0,
+                frame_identity=lambda frame: frame,
+                http_get=lambda *_args, **_kwargs: self.fail(
+                    "cancelled resolver issued a request"
+                ),
+                cancel_event=cancelled,
+            )
+
     def test_resolves_pdt_and_persists_no_signed_urls(self):
         master = """#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1000
@@ -80,6 +234,12 @@ getMP4MediaFragment.mp4?FragmentNumber=frag-123&SessionToken=media-secret
         self.assertEqual(
             metadata["media_clock"]["anchor_fragment_frame_offset_milliseconds"],
             1968.0,
+        )
+
+        restarted = clock.reanchor_from_exact_match(250.5, 0.0)
+        self.assertEqual(
+            restarted.metadata_at(0.0)["media_timestamp_utc"],
+            metadata["media_timestamp_utc"],
         )
 
         serialized = json.dumps(metadata)
@@ -172,6 +332,45 @@ getMP4MediaFragment.mp4?FragmentNumber=frag-123&SessionToken=media-secret
             http_get=lambda _url, timeout: next(responses),
             fragment_matcher=lambda *_args: 0.0,
         ))
+
+    def test_trusted_lower_bound_prunes_only_obsolete_complete_fragments(self):
+        media = (
+            "#EXTM3U\n"
+            "#EXT-X-MAP:URI=init.mp4\n"
+            "#EXT-X-MEDIA-SEQUENCE:10\n"
+            "#EXT-X-PROGRAM-DATE-TIME:2026-07-10T03:57:20Z\n"
+            "#EXTINF:2.0,\nsegment-old.mp4\n"
+            "#EXT-X-PROGRAM-DATE-TIME:2026-07-10T03:57:22Z\n"
+            "#EXTINF:2.0,\nsegment-boundary.mp4\n"
+            "#EXT-X-PROGRAM-DATE-TIME:2026-07-10T03:57:24Z\n"
+            "#EXTINF:2.0,\nsegment-new.mp4\n"
+        )
+        requested = []
+
+        def get(url, timeout):
+            requested.append(url)
+            if len(requested) == 1:
+                return Response(text=media)
+            if url.endswith("init.mp4"):
+                return Response(content=b"init")
+            return Response(content=url.rsplit("/", 1)[-1].encode())
+
+        clock = resolve_hls_media_clock(
+            "https://example.invalid/media.m3u8",
+            reference_frame="target",
+            capture_position_milliseconds=0.0,
+            frame_identity=lambda frame: frame,
+            http_get=get,
+            fragment_matcher=lambda _init, segment, *_args: (
+                250.0 if segment == b"segment-new.mp4" else None
+            ),
+            not_before_media_time_utc="2026-07-10T03:57:23.500Z",
+        )
+
+        self.assertIsNotNone(clock)
+        self.assertFalse(any("segment-old.mp4" in url for url in requested))
+        self.assertTrue(any("segment-boundary.mp4" in url for url in requested))
+        self.assertTrue(any("segment-new.mp4" in url for url in requested))
 
     @patch("kinesis_utils.get_video_session_hls_url", return_value=None)
     @patch("kinesis_utils.boto3.client")

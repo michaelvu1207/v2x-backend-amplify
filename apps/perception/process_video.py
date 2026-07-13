@@ -4,6 +4,7 @@ import cv2
 import math
 import os
 import re
+import signal
 import threading
 from pathlib import Path
 import numpy as np
@@ -282,6 +283,14 @@ class FrameBroadcaster:
                 "last_frame_monotonic": None,
                 "last_error": None,
                 "reconnect_attempts": 0,
+                "terminal_failover_attempts": 0,
+                "terminal_failover_successes": 0,
+                "terminal_failover_failures": 0,
+                "terminal_failover_last_outcome": None,
+                "terminal_failover_last_duration_seconds": None,
+                "terminal_failover_last_method": None,
+                "terminal_failover_last_stage": None,
+                "terminal_failover_last_evidence": None,
                 "media_clock_status": "unavailable",
                 "media_time_trusted": False,
                 "decode_latency_ms": None,
@@ -421,6 +430,59 @@ class FrameBroadcaster:
             })
             self.condition.notify_all()
 
+    def mark_terminal_failover(
+        self, camera_id, outcome, duration_seconds, method, stage=None,
+        evidence=None,
+    ):
+        if outcome not in {"succeeded", "failed", "stopped"}:
+            raise ValueError("terminal failover outcome is invalid")
+        duration = float(duration_seconds)
+        if not math.isfinite(duration) or duration < 0.0:
+            raise ValueError("terminal failover duration is invalid")
+        if method not in {
+            "same_session_restart",
+            "proactive_replacement",
+            "fresh_session_replacement",
+        }:
+            raise ValueError("terminal failover method is invalid")
+        if stage not in {
+            None,
+            "source",
+            "preparation_slot",
+            "clock_source",
+            "capture_open",
+            "first_frame",
+            "capture_position",
+            "recent_exact_anchor",
+            "clock_resolution",
+            "clock_validation",
+            "ready",
+            "failed",
+        }:
+            raise ValueError("terminal failover stage is invalid")
+        if evidence not in {
+            None,
+            "recent_exact_sequence",
+            "exact_fragment_match",
+            "no_media_clock",
+        }:
+            raise ValueError("terminal failover evidence is invalid")
+        with self.condition:
+            health = self.camera_health[camera_id]
+            health["terminal_failover_attempts"] += 1
+            if outcome == "succeeded":
+                health["terminal_failover_successes"] += 1
+            elif outcome == "failed":
+                health["terminal_failover_failures"] += 1
+            health["terminal_failover_last_outcome"] = outcome
+            health["terminal_failover_last_method"] = method
+            health["terminal_failover_last_stage"] = stage
+            health["terminal_failover_last_evidence"] = evidence
+            health["terminal_failover_last_duration_seconds"] = round(
+                duration, 3
+            )
+            self.condition.notify_all()
+
     def snapshot_health(self, now_monotonic=None):
         now = time.monotonic() if now_monotonic is None else float(now_monotonic)
         with self.condition:
@@ -474,6 +536,30 @@ class FrameBroadcaster:
                     ),
                     "last_error": sanitize_source_error(entry["last_error"]),
                     "reconnect_attempts": entry["reconnect_attempts"],
+                    "terminal_failover_attempts": entry[
+                        "terminal_failover_attempts"
+                    ],
+                    "terminal_failover_successes": entry[
+                        "terminal_failover_successes"
+                    ],
+                    "terminal_failover_failures": entry[
+                        "terminal_failover_failures"
+                    ],
+                    "terminal_failover_last_outcome": entry[
+                        "terminal_failover_last_outcome"
+                    ],
+                    "terminal_failover_last_duration_seconds": entry[
+                        "terminal_failover_last_duration_seconds"
+                    ],
+                    "terminal_failover_last_method": entry[
+                        "terminal_failover_last_method"
+                    ],
+                    "terminal_failover_last_stage": entry[
+                        "terminal_failover_last_stage"
+                    ],
+                    "terminal_failover_last_evidence": entry[
+                        "terminal_failover_last_evidence"
+                    ],
                     "media_clock_status": entry["media_clock_status"],
                     "media_time_trusted": entry["media_time_trusted"],
                     "decode_latency_ms": entry["decode_latency_ms"],
@@ -620,6 +706,7 @@ class PerceptionHttpServer:
                         break
 
         self.httpd = ThreadingHTTPServer((self.host, self.port), Handler)
+        self.httpd.daemon_threads = True
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
         print(f"Perception MJPEG server listening on http://{self.host}:{self.port}")
@@ -936,7 +1023,7 @@ class MultiCameraPipeline:
 
         return tracked_buffer
 
-    def process_streams(self, video_paths, show_live=True, upload=False, output_json=None, output_video=None, output_image=None, output_validate=False, stream_broadcaster=None, camera_ids=None, upload_min_interval_sec=0.0):
+    def process_streams(self, video_paths, show_live=True, upload=False, output_json=None, output_video=None, output_image=None, output_validate=False, stream_broadcaster=None, camera_ids=None, upload_min_interval_sec=0.0, shutdown_event=None):
         """
         Processes multiple videos in parallel, running YOLO, 3D math, and deduplication.
 
@@ -955,6 +1042,7 @@ class MultiCameraPipeline:
         Returns:
             None
         """
+        shutdown_event = shutdown_event or threading.Event()
         if len(self.detectors) != len(video_paths):
             print("Error: Number of detectors must match number of video paths.")
             return
@@ -988,17 +1076,17 @@ class MultiCameraPipeline:
                 "V2X_PERCEPTION_PROACTIVE_RENEW_SEC must be between 30 and 270"
             )
         terminal_read_failover_seconds = env_float(
-            "V2X_PERCEPTION_TERMINAL_READ_FAILOVER_SEC", 5.0
+            "V2X_PERCEPTION_TERMINAL_READ_FAILOVER_SEC", 8.0
         )
         if not 0.0 <= terminal_read_failover_seconds <= 10.0:
             raise ValueError(
                 "V2X_PERCEPTION_TERMINAL_READ_FAILOVER_SEC must be between 0 and 10"
             )
         capture_hls_fragments = int(env_float(
-            "V2X_PERCEPTION_CAPTURE_HLS_FRAGMENTS", 1
+            "V2X_PERCEPTION_CAPTURE_HLS_FRAGMENTS", 2
         ))
         clock_hls_fragments = int(env_float(
-            "V2X_PERCEPTION_CLOCK_HLS_FRAGMENTS", 5
+            "V2X_PERCEPTION_CLOCK_HLS_FRAGMENTS", 4
         ))
         if not 1 <= capture_hls_fragments <= 2:
             raise ValueError(
@@ -1060,7 +1148,7 @@ class MultiCameraPipeline:
                 )
             return path
 
-        def _open_capture(source, live):
+        def _open_capture(source, live, cancel_event=None):
             if not live:
                 return cv2.VideoCapture(source)
 
@@ -1070,6 +1158,7 @@ class MultiCameraPipeline:
                     open_timeout_ms=open_timeout_ms,
                     read_timeout_ms=read_timeout_ms,
                     ffmpeg_binary=ffmpeg_binary,
+                    cancel_event=cancel_event,
                 )
 
             params = []
@@ -1095,12 +1184,28 @@ class MultiCameraPipeline:
             last_stream_publish_monotonic = [float("-inf")] * len(video_paths)
 
             def _state_callback(index):
-                def callback(state, error, failures, delay_seconds):
+                def callback(
+                    state, error, failures, delay_seconds, method=None, stage=None,
+                    evidence=None,
+                ):
                     if state == "connected":
                         if stream_broadcaster:
                             stream_broadcaster.mark_connected(camera_ids[index])
                         return
                     if state == "renewed":
+                        return
+                    if state.startswith("terminal_failover_"):
+                        outcome = state.removeprefix("terminal_failover_")
+                        if stream_broadcaster:
+                            stream_broadcaster.mark_terminal_failover(
+                                camera_ids[index], outcome, delay_seconds, method,
+                                stage, evidence,
+                            )
+                        print(
+                            f"Camera {camera_ids[index]} terminal failover "
+                            f"{outcome} at {stage or 'unknown'} after "
+                            f"{delay_seconds:.3f}s ({evidence or 'no evidence'})."
+                        )
                         return
                     if stream_broadcaster:
                         stream_broadcaster.mark_reconnecting(
@@ -1149,7 +1254,9 @@ class MultiCameraPipeline:
                 recovery = StreamRecovery(reconnect_initial, reconnect_max)
                 reader = LiveStreamReader(
                     source_factory=lambda index=index: _source_for(index),
-                    capture_factory=lambda source: _open_capture(source, True),
+                    capture_factory=lambda source, cancel_event=None: _open_capture(
+                        source, True, cancel_event=cancel_event
+                    ),
                     recovery=recovery,
                     state_callback=_state_callback(index),
                     frame_callback=_frame_callback(index),
@@ -1236,7 +1343,7 @@ class MultiCameraPipeline:
                 if f is not None:
                     last_valid_frames[i] = f.copy()
 
-            while True:
+            while not shutdown_event.is_set():
                 frames_to_process = [None] * num_cams
                 pending_live_sequences = [None] * num_cams
                 source_epochs = [None] * num_cams
@@ -1874,6 +1981,13 @@ class VideoObjectDetector:
         return annotated
 
 if __name__ == "__main__":
+    shutdown_event = threading.Event()
+
+    def request_shutdown(_signum, _frame):
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
     model_path = os.getenv("V2X_PERCEPTION_MODEL_PATH", "yolov8n.pt")
     conf = env_float("V2X_PERCEPTION_CONFIDENCE", 0.5)
 
@@ -1953,10 +2067,12 @@ if __name__ == "__main__":
             stream_broadcaster=stream_broadcaster,
             camera_ids=camera_ids,
             upload_min_interval_sec=upload_min_interval_sec,
+            shutdown_event=shutdown_event,
         )
     finally:
         if stream_server:
             stream_server.stop()
+        kinesis_utils.shutdown_media_clock_executors()
 
     # Or upload all at once after processing:
     # detector.upload_all()

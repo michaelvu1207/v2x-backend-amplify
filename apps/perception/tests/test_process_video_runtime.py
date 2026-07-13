@@ -111,6 +111,56 @@ class FrameBroadcasterTests(unittest.TestCase):
         self.assertIsNone(frame)
         self.assertEqual(count, -1)
 
+    def test_terminal_failover_telemetry_is_explicit_and_cumulative(self):
+        self.broadcaster.mark_terminal_failover(
+            "ch1", "succeeded", 4.25, "same_session_restart", "ready",
+            "recent_exact_sequence",
+        )
+        self.broadcaster.mark_terminal_failover(
+            "ch1", "failed", 8.0, "fresh_session_replacement", "capture_open",
+            "exact_fragment_match",
+        )
+        health = self.broadcaster.snapshot_health()["cameras"]["ch1"]
+        self.assertEqual(health["terminal_failover_attempts"], 2)
+        self.assertEqual(health["terminal_failover_successes"], 1)
+        self.assertEqual(health["terminal_failover_failures"], 1)
+        self.assertEqual(health["terminal_failover_last_outcome"], "failed")
+        self.assertEqual(
+            health["terminal_failover_last_method"],
+            "fresh_session_replacement",
+        )
+        self.assertEqual(
+            health["terminal_failover_last_duration_seconds"], 8.0
+        )
+        self.assertEqual(
+            health["terminal_failover_last_stage"], "capture_open"
+        )
+        self.assertEqual(
+            health["terminal_failover_last_evidence"], "exact_fragment_match"
+        )
+
+        with self.assertRaisesRegex(ValueError, "outcome"):
+            self.broadcaster.mark_terminal_failover(
+                "ch1", "unknown", 1.0, "same_session_restart"
+            )
+        with self.assertRaisesRegex(ValueError, "duration"):
+            self.broadcaster.mark_terminal_failover(
+                "ch1", "failed", -1.0, "same_session_restart"
+            )
+        with self.assertRaisesRegex(ValueError, "method"):
+            self.broadcaster.mark_terminal_failover(
+                "ch1", "failed", 1.0, "unknown"
+            )
+        with self.assertRaisesRegex(ValueError, "stage"):
+            self.broadcaster.mark_terminal_failover(
+                "ch1", "failed", 1.0, "same_session_restart", "signed-url"
+            )
+        with self.assertRaisesRegex(ValueError, "evidence"):
+            self.broadcaster.mark_terminal_failover(
+                "ch1", "failed", 1.0, "same_session_restart", "failed",
+                "receipt_time_guess",
+            )
+
     def test_health_age_uses_capture_time_not_inference_completion_time(self):
         self.broadcaster.mark_connected("ch1")
         self.broadcaster.publish(
@@ -433,6 +483,8 @@ class LivePipelineTimestampTests(unittest.TestCase):
 
         def __init__(self, **_kwargs):
             self.snapshot_calls = 0
+            self.stop_requested = False
+            self.joined = False
             self.kwargs = _kwargs
             self.instances.append(self)
 
@@ -459,9 +511,11 @@ class LivePipelineTimestampTests(unittest.TestCase):
             raise LivePipelineTimestampTests.StopPipeline()
 
         def request_stop(self):
+            self.stop_requested = True
             return None
 
         def join(self, _timeout):
+            self.joined = True
             return None
 
     class ThrottledFakeReader(FakeReader):
@@ -489,6 +543,34 @@ class LivePipelineTimestampTests(unittest.TestCase):
                 "source_epoch": 1_000.0 + index,
                 "source_monotonic": 500.0 + index,
             }
+
+    @patch("process_video.LiveStreamReader", FakeReader)
+    def test_pre_requested_shutdown_cleans_up_without_consuming_frames(self):
+        self.FakeReader.instances.clear()
+        pipeline = object.__new__(MultiCameraPipeline)
+        pipeline.detectors = [self.FakeDetector()]
+        pipeline.all_clean_detections = []
+        pipeline.global_tracks = {}
+        pipeline.local_to_global = {}
+        pipeline.next_global_id = 0
+        pipeline.extractor = Mock()
+        shutdown = threading.Event()
+        shutdown.set()
+
+        pipeline.process_streams(
+            ["v2x-backend-cam-ch1"],
+            show_live=False,
+            upload=False,
+            stream_broadcaster=FrameBroadcaster(["ch1"]),
+            camera_ids=["ch1"],
+            shutdown_event=shutdown,
+        )
+
+        self.assertEqual(len(self.FakeReader.instances), 1)
+        reader = self.FakeReader.instances[0]
+        self.assertEqual(reader.snapshot_calls, 0)
+        self.assertTrue(reader.stop_requested)
+        self.assertTrue(reader.joined)
 
     @patch("process_video.LiveStreamReader", FakeReader)
     def test_pipeline_uses_per_camera_capture_time_and_source_age(self):
@@ -528,7 +610,7 @@ class LivePipelineTimestampTests(unittest.TestCase):
             self.FakeReader.instances[0].kwargs[
                 "terminal_read_failover_seconds"
             ],
-            5.0,
+            8.0,
         )
         self.assertTrue(callable(
             self.FakeReader.instances[0].kwargs["frame_callback"]

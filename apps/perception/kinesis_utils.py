@@ -1,10 +1,12 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import math
+import inspect
 import os
 import re
 import tempfile
+import threading
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import boto3
@@ -26,6 +28,43 @@ load_dotenv()
 # the unchanged 15-second freshness gate. Exact matching still covers every
 # fragment; the smaller pool changes scheduling only, not clock evidence.
 _NVDEC_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+# Terminal recovery must not wait behind proactive four-camera clock work. A
+# terminal reader has already lost its live decoder, so two reserved exact-match
+# workers run only off the steady-state path while proactive preparations remain
+# serialized. They use the same matcher and ambiguity gate as the normal pool.
+_NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+# Normal and urgent pools keep terminal work from queueing behind proactive
+# work, but both must share one hard decoder envelope. This prevents a normal
+# exact-clock match and an urgent terminal match from creating four additional
+# NVDEC sessions beside the four live readers. Acquisition remains cancellable
+# so discarded preparations cannot wait indefinitely for a slot.
+_NVDEC_FRAGMENT_MATCH_SLOTS = threading.BoundedSemaphore(value=2)
+
+
+def shutdown_media_clock_executors():
+    """Quiesce URL-free fragment workers during cooperative process shutdown."""
+    _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR.shutdown(
+        wait=True, cancel_futures=True
+    )
+    _NVDEC_FRAGMENT_MATCH_EXECUTOR.shutdown(wait=True, cancel_futures=True)
+
+
+def _run_nvdec_fragment_match(
+    fragment_matcher, args, kwargs, cancel_event=None
+):
+    """Run one exact fragment decoder inside the process-wide NVDEC cap."""
+    acquired = False
+    try:
+        while not acquired:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("HLS media clock resolution cancelled")
+            acquired = _NVDEC_FRAGMENT_MATCH_SLOTS.acquire(timeout=0.05)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("HLS media clock resolution cancelled")
+        return fragment_matcher(*args, **kwargs)
+    finally:
+        if acquired:
+            _NVDEC_FRAGMENT_MATCH_SLOTS.release()
 
 
 def _utc_iso(epoch):
@@ -68,6 +107,30 @@ class HlsMediaClock:
     anchor_fragment_id: str = None
     anchor_media_sequence: int = None
     segment_duration_seconds: float = None
+
+    def reanchor_from_exact_match(
+        self, previous_position_milliseconds, new_position_milliseconds
+    ):
+        """Map a restarted decoder cursor through one exact repeated frame."""
+        previous_position = float(previous_position_milliseconds)
+        new_position = float(new_position_milliseconds)
+        if (
+            not math.isfinite(previous_position)
+            or not math.isfinite(new_position)
+            or previous_position < 0.0
+            or new_position < 0.0
+            or self.metadata_at(previous_position) is None
+        ):
+            return None
+        previous_delta = (
+            previous_position - self.anchor_capture_position_milliseconds
+        )
+        return replace(
+            self,
+            anchor_capture_position_milliseconds=(
+                new_position - previous_delta
+            ),
+        )
 
     def metadata_at(self, position_milliseconds):
         position = float(position_milliseconds)
@@ -208,6 +271,7 @@ def _match_fragment_frame(
     segment_bytes,
     target_identity,
     frame_identity,
+    cancel_event=None,
 ):
     """Return the exact frame offset within one fMP4 fragment, if present."""
     import cv2
@@ -227,6 +291,8 @@ def _match_fragment_frame(
             return None
         matches = []
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             ok, frame = capture.read()
             if not ok or frame is None:
                 break
@@ -254,6 +320,9 @@ def resolve_hls_media_clock(
     timeout=10,
     http_get=requests.get,
     fragment_matcher=_match_fragment_frame,
+    not_before_media_time_utc=None,
+    urgent=False,
+    cancel_event=None,
 ):
     """Match one decoded frame to its exact HLS PDT/fragment position.
 
@@ -263,8 +332,14 @@ def resolve_hls_media_clock(
     matches the actual first frame before establishing an anchor. No match means
     no media timestamp; receipt time is never relabeled as archive time.
     """
+    def require_active():
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("HLS media clock resolution cancelled")
+
+    require_active()
     response = http_get(hls_url, timeout=timeout)
     response.raise_for_status()
+    require_active()
     lines = [line.strip() for line in response.text.splitlines() if line.strip()]
 
     if any(line.startswith("#EXT-X-STREAM-INF:") for line in lines):
@@ -274,10 +349,25 @@ def resolve_hls_media_clock(
         playlist_url = urljoin(hls_url, media_uri)
         response = http_get(playlist_url, timeout=timeout)
         response.raise_for_status()
+        require_active()
     else:
         playlist_url = hls_url
 
     fragments = _fragments_from_media_playlist(playlist_url, response.text)
+    if not_before_media_time_utc is not None:
+        not_before_epoch = _parse_program_date_time(
+            not_before_media_time_utc
+        )
+        fragments = [
+            fragment for fragment in fragments
+            if (
+                fragment.duration_seconds is None
+                or not math.isfinite(fragment.duration_seconds)
+                or fragment.program_date_time_epoch
+                + max(0.0, fragment.duration_seconds)
+                >= not_before_epoch
+            )
+        ]
     if not fragments:
         return None
 
@@ -288,23 +378,50 @@ def resolve_hls_media_clock(
     )
     init_cache = {}
     for init_url in {fragment.init_url for fragment in fragments}:
+        require_active()
         init_response = http_get(init_url, timeout=timeout)
         init_response.raise_for_status()
+        require_active()
         init_cache[init_url] = _bounded_content(init_response)
 
     def download_fragment(fragment):
+        require_active()
         segment_response = http_get(fragment.segment_url, timeout=timeout)
         segment_response.raise_for_status()
+        require_active()
         return fragment, _bounded_content(segment_response)
 
     def match_downloaded_fragment(downloaded):
+        require_active()
         fragment, segment_bytes = downloaded
-        frame_offset = fragment_matcher(
+        try:
+            parameters = inspect.signature(fragment_matcher).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_keywords = any(
+            value.kind == inspect.Parameter.VAR_KEYWORD
+            for value in parameters.values()
+        )
+        kwargs = (
+            {"cancel_event": cancel_event}
+            if accepts_keywords or "cancel_event" in parameters
+            else {}
+        )
+        args = (
             init_cache[fragment.init_url],
             segment_bytes,
             target_identity,
             frame_identity,
         )
+        if fragment_matcher is match_fragment_frame_nvdec:
+            frame_offset = _run_nvdec_fragment_match(
+                fragment_matcher,
+                args,
+                kwargs,
+                cancel_event=cancel_event,
+            )
+        else:
+            frame_offset = fragment_matcher(*args, **kwargs)
         return None if frame_offset is None else (fragment, frame_offset)
 
     # Signed KVS fragment requests can each block for several seconds. Fetch
@@ -321,8 +438,13 @@ def resolve_hls_media_clock(
         # sessions during a clock re-anchor.
         with ThreadPoolExecutor(max_workers=min(5, len(fragments))) as executor:
             downloaded = list(executor.map(download_fragment, fragments))
+        match_executor = (
+            _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR
+            if urgent
+            else _NVDEC_FRAGMENT_MATCH_EXECUTOR
+        )
         futures = [
-            _NVDEC_FRAGMENT_MATCH_EXECUTOR.submit(
+            match_executor.submit(
                 match_downloaded_fragment, fragment
             )
             for fragment in downloaded
@@ -376,6 +498,9 @@ def resolve_hls_media_clock_nvdec(
     capture_position_milliseconds,
     frame_identity,
     timeout=10,
+    not_before_media_time_utc=None,
+    urgent=False,
+    cancel_event=None,
 ):
     """Resolve an exact clock using the same pixels as the NVDEC live reader."""
     return resolve_hls_media_clock(
@@ -385,6 +510,9 @@ def resolve_hls_media_clock_nvdec(
         frame_identity,
         timeout=timeout,
         fragment_matcher=match_fragment_frame_nvdec,
+        not_before_media_time_utc=not_before_media_time_utc,
+        urgent=urgent,
+        cancel_event=cancel_event,
     )
 
 def _camera_id_from_stream_name(stream_name):
