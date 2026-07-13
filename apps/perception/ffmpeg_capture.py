@@ -53,6 +53,22 @@ _HLS_HOLD_COUNTERS = 3
 _HLS_FETCH_TIMEOUT_SECONDS = 7.0
 _HLS_PACKET_PROBE_TIMEOUT_SECONDS = 5.0
 _HLS_MEDIATOR_CLOSE_TIMEOUT_SECONDS = 13.0
+_FFMPEG_TERMINATE_WAIT_SECONDS = 3.0
+_FFMPEG_KILL_WAIT_SECONDS = 3.0
+_PTS_SIDECAR_CLOSE_TIMEOUT_SECONDS = 1.0
+_CANCEL_WATCHER_JOIN_TIMEOUT_SECONDS = 0.2
+
+# Native VideoCapture release runs only after its FIFO writer is dead. This
+# reserve covers every explicit finite wait around that native call; the outer
+# process deadline remains the final fail-closed boundary if native teardown
+# itself violates the established writer-first behavior.
+NVDEC_CAPTURE_RELEASE_WAIT_RESERVE_SECONDS = (
+    _FFMPEG_TERMINATE_WAIT_SECONDS
+    + _FFMPEG_KILL_WAIT_SECONDS
+    + _PTS_SIDECAR_CLOSE_TIMEOUT_SECONDS
+    + _HLS_MEDIATOR_CLOSE_TIMEOUT_SECONDS
+    + _CANCEL_WATCHER_JOIN_TIMEOUT_SECONDS
+)
 
 
 class NvdecCaptureError(RuntimeError):
@@ -1983,7 +1999,7 @@ class FfmpegNvdecCapture:
                 except ProcessLookupError:
                     pass
                 try:
-                    process.wait(timeout=3)
+                    process.wait(timeout=_FFMPEG_TERMINATE_WAIT_SECONDS)
                 except subprocess.TimeoutExpired:
                     if process.poll() is None:
                         try:
@@ -1991,7 +2007,7 @@ class FfmpegNvdecCapture:
                         except ProcessLookupError:
                             pass
                         try:
-                            process.wait(timeout=3)
+                            process.wait(timeout=_FFMPEG_KILL_WAIT_SECONDS)
                         except subprocess.TimeoutExpired:
                             if process.poll() is None:
                                 cleanup_error = NvdecCaptureError(
@@ -2026,7 +2042,9 @@ class FfmpegNvdecCapture:
                 sidecar = getattr(self, "_pts_sidecar", None)
                 if sidecar is not None:
                     try:
-                        sidecar.close(timeout=1.0)
+                        sidecar.close(
+                            timeout=_PTS_SIDECAR_CLOSE_TIMEOUT_SECONDS
+                        )
                     except Exception as exc:
                         if cleanup_error is None:
                             cleanup_error = exc
@@ -2063,7 +2081,7 @@ class FfmpegNvdecCapture:
                 and watcher is not threading.current_thread()
                 and watcher.is_alive()
             ):
-                watcher.join(timeout=0.2)
+                watcher.join(timeout=_CANCEL_WATCHER_JOIN_TIMEOUT_SECONDS)
             if cleanup_error is not None:
                 raise cleanup_error
 
