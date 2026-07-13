@@ -282,6 +282,11 @@ class FrameBroadcaster:
                 "last_frame_monotonic": None,
                 "last_error": None,
                 "reconnect_attempts": 0,
+                "terminal_failover_attempts": 0,
+                "terminal_failover_successes": 0,
+                "terminal_failover_failures": 0,
+                "terminal_failover_last_outcome": None,
+                "terminal_failover_last_duration_seconds": None,
                 "media_clock_status": "unavailable",
                 "media_time_trusted": False,
                 "decode_latency_ms": None,
@@ -421,6 +426,25 @@ class FrameBroadcaster:
             })
             self.condition.notify_all()
 
+    def mark_terminal_failover(self, camera_id, outcome, duration_seconds):
+        if outcome not in {"succeeded", "failed", "stopped"}:
+            raise ValueError("terminal failover outcome is invalid")
+        duration = float(duration_seconds)
+        if not math.isfinite(duration) or duration < 0.0:
+            raise ValueError("terminal failover duration is invalid")
+        with self.condition:
+            health = self.camera_health[camera_id]
+            health["terminal_failover_attempts"] += 1
+            if outcome == "succeeded":
+                health["terminal_failover_successes"] += 1
+            elif outcome == "failed":
+                health["terminal_failover_failures"] += 1
+            health["terminal_failover_last_outcome"] = outcome
+            health["terminal_failover_last_duration_seconds"] = round(
+                duration, 3
+            )
+            self.condition.notify_all()
+
     def snapshot_health(self, now_monotonic=None):
         now = time.monotonic() if now_monotonic is None else float(now_monotonic)
         with self.condition:
@@ -474,6 +498,21 @@ class FrameBroadcaster:
                     ),
                     "last_error": sanitize_source_error(entry["last_error"]),
                     "reconnect_attempts": entry["reconnect_attempts"],
+                    "terminal_failover_attempts": entry[
+                        "terminal_failover_attempts"
+                    ],
+                    "terminal_failover_successes": entry[
+                        "terminal_failover_successes"
+                    ],
+                    "terminal_failover_failures": entry[
+                        "terminal_failover_failures"
+                    ],
+                    "terminal_failover_last_outcome": entry[
+                        "terminal_failover_last_outcome"
+                    ],
+                    "terminal_failover_last_duration_seconds": entry[
+                        "terminal_failover_last_duration_seconds"
+                    ],
                     "media_clock_status": entry["media_clock_status"],
                     "media_time_trusted": entry["media_time_trusted"],
                     "decode_latency_ms": entry["decode_latency_ms"],
@@ -988,7 +1027,7 @@ class MultiCameraPipeline:
                 "V2X_PERCEPTION_PROACTIVE_RENEW_SEC must be between 30 and 270"
             )
         terminal_read_failover_seconds = env_float(
-            "V2X_PERCEPTION_TERMINAL_READ_FAILOVER_SEC", 5.0
+            "V2X_PERCEPTION_TERMINAL_READ_FAILOVER_SEC", 8.0
         )
         if not 0.0 <= terminal_read_failover_seconds <= 10.0:
             raise ValueError(
@@ -1101,6 +1140,17 @@ class MultiCameraPipeline:
                             stream_broadcaster.mark_connected(camera_ids[index])
                         return
                     if state == "renewed":
+                        return
+                    if state.startswith("terminal_failover_"):
+                        outcome = state.removeprefix("terminal_failover_")
+                        if stream_broadcaster:
+                            stream_broadcaster.mark_terminal_failover(
+                                camera_ids[index], outcome, delay_seconds
+                            )
+                        print(
+                            f"Camera {camera_ids[index]} terminal failover "
+                            f"{outcome} after {delay_seconds:.3f}s."
+                        )
                         return
                     if stream_broadcaster:
                         stream_broadcaster.mark_reconnecting(

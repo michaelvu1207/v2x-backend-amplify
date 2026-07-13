@@ -111,6 +111,23 @@ class FrameBroadcasterTests(unittest.TestCase):
         self.assertIsNone(frame)
         self.assertEqual(count, -1)
 
+    def test_terminal_failover_telemetry_is_explicit_and_cumulative(self):
+        self.broadcaster.mark_terminal_failover("ch1", "succeeded", 4.25)
+        self.broadcaster.mark_terminal_failover("ch1", "failed", 8.0)
+        health = self.broadcaster.snapshot_health()["cameras"]["ch1"]
+        self.assertEqual(health["terminal_failover_attempts"], 2)
+        self.assertEqual(health["terminal_failover_successes"], 1)
+        self.assertEqual(health["terminal_failover_failures"], 1)
+        self.assertEqual(health["terminal_failover_last_outcome"], "failed")
+        self.assertEqual(
+            health["terminal_failover_last_duration_seconds"], 8.0
+        )
+
+        with self.assertRaisesRegex(ValueError, "outcome"):
+            self.broadcaster.mark_terminal_failover("ch1", "unknown", 1.0)
+        with self.assertRaisesRegex(ValueError, "duration"):
+            self.broadcaster.mark_terminal_failover("ch1", "failed", -1.0)
+
     def test_health_age_uses_capture_time_not_inference_completion_time(self):
         self.broadcaster.mark_connected("ch1")
         self.broadcaster.publish(
@@ -528,7 +545,7 @@ class LivePipelineTimestampTests(unittest.TestCase):
             self.FakeReader.instances[0].kwargs[
                 "terminal_read_failover_seconds"
             ],
-            5.0,
+            8.0,
         )
         self.assertTrue(callable(
             self.FakeReader.instances[0].kwargs["frame_callback"]

@@ -331,7 +331,7 @@ class LiveStreamReader:
         connection_max_age_seconds=None,
         connection_renewal_lead_seconds=15.0,
         connection_initial_renewal_delay_seconds=0.0,
-        terminal_read_failover_seconds=5.0,
+        terminal_read_failover_seconds=8.0,
     ):
         self.source_factory = source_factory
         self.capture_factory = capture_factory
@@ -493,7 +493,17 @@ class LiveStreamReader:
                 preparation.discard()
             return None
 
-        deadline = self.monotonic() + self.terminal_read_failover_seconds
+        started = self.monotonic()
+        deadline = started + self.terminal_read_failover_seconds
+
+        def finish(result, outcome):
+            elapsed = max(0.0, self.monotonic() - started)
+            self._notify(
+                f"terminal_failover_{outcome}",
+                delay_seconds=elapsed,
+            )
+            return result
+
         candidate = preparation or self._prepare_replacement_capture()
         # If an already-running proactive preparation fails at the same moment
         # as the active reader, permit one clean connection-local attempt. If
@@ -504,13 +514,13 @@ class LiveStreamReader:
             done, result, failed = candidate.poll()
             if done:
                 if not failed and result is not None:
-                    return candidate.take()
+                    return finish(candidate.take(), "succeeded")
                 candidate.discard()
                 if (
                     not may_start_fresh_attempt
                     or self.monotonic() >= deadline
                 ):
-                    return None
+                    return finish(None, "failed")
                 may_start_fresh_attempt = False
                 candidate = self._prepare_replacement_capture()
                 continue
@@ -518,11 +528,11 @@ class LiveStreamReader:
             remaining = deadline - self.monotonic()
             if remaining <= 0.0:
                 candidate.discard()
-                return None
+                return finish(None, "failed")
             self._stop_event.wait(min(0.01, remaining))
 
         candidate.discard()
-        return None
+        return finish(None, "stopped")
 
     def _run(self):
         while not self._stop_event.is_set():

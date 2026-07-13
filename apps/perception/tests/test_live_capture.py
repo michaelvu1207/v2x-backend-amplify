@@ -197,6 +197,12 @@ class LiveStreamReaderTests(unittest.TestCase):
             self.assertTrue(any(
                 event["state"] == "renewed" for event in states
             ))
+            terminal = [
+                event for event in states
+                if event["state"] == "terminal_failover_succeeded"
+            ]
+            self.assertEqual(len(terminal), 1)
+            self.assertGreaterEqual(terminal[0]["delay_seconds"], 0.0)
             self.assertFalse(any(
                 event["state"] == "reconnecting" for event in states
             ))
@@ -217,6 +223,7 @@ class LiveStreamReaderTests(unittest.TestCase):
     def test_failed_terminal_hot_failover_does_not_spin_session_mints(self):
         source_calls = []
         captures = []
+        states = []
         reconnecting = threading.Event()
 
         def source_factory():
@@ -231,6 +238,7 @@ class LiveStreamReaderTests(unittest.TestCase):
             return capture
 
         def state_callback(**event):
+            states.append(event)
             if event["state"] == "reconnecting":
                 reconnecting.set()
 
@@ -249,6 +257,13 @@ class LiveStreamReaderTests(unittest.TestCase):
                 "signed-session-1",
                 "signed-session-2",
             ])
+            self.assertEqual(
+                sum(
+                    event["state"] == "terminal_failover_failed"
+                    for event in states
+                ),
+                1,
+            )
         finally:
             reader.stop(timeout=2.0)
 
