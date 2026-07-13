@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import math
@@ -73,6 +73,30 @@ class HlsMediaClock:
     anchor_fragment_id: str = None
     anchor_media_sequence: int = None
     segment_duration_seconds: float = None
+
+    def reanchor_from_exact_match(
+        self, previous_position_milliseconds, new_position_milliseconds
+    ):
+        """Map a restarted decoder cursor through one exact repeated frame."""
+        previous_position = float(previous_position_milliseconds)
+        new_position = float(new_position_milliseconds)
+        if (
+            not math.isfinite(previous_position)
+            or not math.isfinite(new_position)
+            or previous_position < 0.0
+            or new_position < 0.0
+            or self.metadata_at(previous_position) is None
+        ):
+            return None
+        previous_delta = (
+            previous_position - self.anchor_capture_position_milliseconds
+        )
+        return replace(
+            self,
+            anchor_capture_position_milliseconds=(
+                new_position - previous_delta
+            ),
+        )
 
     def metadata_at(self, position_milliseconds):
         position = float(position_milliseconds)

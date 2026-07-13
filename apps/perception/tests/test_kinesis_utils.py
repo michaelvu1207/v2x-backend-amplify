@@ -82,6 +82,12 @@ getMP4MediaFragment.mp4?FragmentNumber=frag-123&SessionToken=media-secret
             1968.0,
         )
 
+        restarted = clock.reanchor_from_exact_match(250.5, 0.0)
+        self.assertEqual(
+            restarted.metadata_at(0.0)["media_timestamp_utc"],
+            metadata["media_timestamp_utc"],
+        )
+
         serialized = json.dumps(metadata)
         rendered_clock = repr(clock)
         for secret in (

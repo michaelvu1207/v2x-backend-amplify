@@ -450,6 +450,7 @@ class FrameBroadcaster:
             "capture_open",
             "first_frame",
             "capture_position",
+            "recent_exact_anchor",
             "prior_clock_validation",
             "clock_resolution",
             "clock_validation",

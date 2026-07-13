@@ -299,6 +299,7 @@ class _AsyncCaptureRestart:
         capture_factory,
         media_clock_factory,
         media_clock_validator,
+        recent_exact_media_anchors,
         prior_media_clock,
         prior_capture_position,
         capture_position_milliseconds,
@@ -312,6 +313,9 @@ class _AsyncCaptureRestart:
         self._capture_factory = capture_factory
         self._media_clock_factory = media_clock_factory
         self._media_clock_validator = media_clock_validator
+        self._recent_exact_media_anchors = tuple(
+            recent_exact_media_anchors or ()
+        )
         self._prior_media_clock = prior_media_clock
         self._prior_media_time_utc = None
         if (
@@ -376,6 +380,56 @@ class _AsyncCaptureRestart:
                 if position is None:
                     self._set_stage("capture_position")
                     continue
+                if (
+                    self._recent_exact_media_anchors
+                    and self._media_frame_identity is not None
+                    and self._media_clock_validator is not None
+                ):
+                    self._set_stage("recent_exact_anchor")
+                    target_identity = self._media_frame_identity(frame)
+                    anchor_matches = [
+                        anchor for anchor in self._recent_exact_media_anchors
+                        if anchor[0] == target_identity
+                    ]
+                    if len(anchor_matches) == 1:
+                        _, anchor_clock, anchor_position = anchor_matches[0]
+                        reanchor = getattr(
+                            anchor_clock,
+                            "reanchor_from_exact_match",
+                            None,
+                        )
+                        candidate_clock = (
+                            None
+                            if reanchor is None
+                            else reanchor(anchor_position, position)
+                        )
+                        frame_clock = (
+                            None
+                            if candidate_clock is None
+                            else candidate_clock.metadata_at(position)
+                        )
+                        if (
+                            frame_clock is not None
+                            and self._media_clock_validator(
+                                frame_clock, source_epoch
+                            )
+                        ):
+                            with self._result_lock:
+                                if self._discarded.is_set():
+                                    return
+                                self._result = (
+                                    capture,
+                                    frame,
+                                    source_epoch,
+                                    source_monotonic,
+                                    position,
+                                    candidate_clock,
+                                    source,
+                                    clock_source,
+                                )
+                                capture = None
+                            self._set_stage("ready")
+                            return
                 if (
                     self._prior_media_clock is not None
                     and self._media_clock_validator is not None
@@ -483,6 +537,7 @@ class _AsyncCaptureRestart:
             self._capture_factory = None
             self._media_clock_factory = None
             self._media_clock_validator = None
+            self._recent_exact_media_anchors = None
             self._prior_media_clock = None
             self._prior_media_time_utc = None
             self._capture_position_milliseconds = None
@@ -696,6 +751,9 @@ class LiveStreamReader:
         self._latest = None
         self._recent_frame_identities = deque()
         self._recent_frame_identity_set = set()
+        self._recent_exact_media_anchors = deque(
+            maxlen=min(64, self.frame_identity_history_size)
+        )
         self._consecutive_duplicate_frames = 0
 
     def start(self):
@@ -789,6 +847,7 @@ class LiveStreamReader:
             self.capture_factory,
             self.media_clock_factory,
             self.media_clock_validator,
+            tuple(self._recent_exact_media_anchors),
             prior_media_clock,
             prior_capture_position,
             self.capture_position_milliseconds,
@@ -1180,6 +1239,18 @@ class LiveStreamReader:
                         if frame_media_clock is not None:
                             has_trusted_media_clock = True
                             invalid_clock_started = None
+                    if (
+                        frame_media_clock is not None
+                        and media_clock is not None
+                        and capture_position is not None
+                    ):
+                        self._recent_exact_media_anchors.append(
+                            (
+                                self.media_frame_identity(frame),
+                                media_clock,
+                                capture_position,
+                            )
+                        )
                     self._remember_frame_identity(identity)
                     self._consecutive_duplicate_frames = 0
                     self.recovery.record_success()
