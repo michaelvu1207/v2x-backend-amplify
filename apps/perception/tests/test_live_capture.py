@@ -446,6 +446,71 @@ class LiveStreamReaderTests(unittest.TestCase):
         finally:
             reader.stop(timeout=2.0)
 
+    def test_proactive_preparations_are_serialized_process_wide(self):
+        release_clock = threading.Event()
+        entered_clock = threading.Event()
+        lock = threading.Lock()
+        active_replacement_clocks = 0
+        maximum_active_replacement_clocks = 0
+        readers = []
+        states = {"left": [], "right": []}
+
+        def make_reader(label):
+            source_calls = []
+
+            def source_factory():
+                source = f"{label}-session-{len(source_calls) + 1}"
+                source_calls.append(source)
+                return source
+
+            def media_clock_factory(source, *_args):
+                nonlocal active_replacement_clocks
+                nonlocal maximum_active_replacement_clocks
+                if not source.endswith("-1"):
+                    with lock:
+                        active_replacement_clocks += 1
+                        maximum_active_replacement_clocks = max(
+                            maximum_active_replacement_clocks,
+                            active_replacement_clocks,
+                        )
+                        entered_clock.set()
+                    release_clock.wait(1.0)
+                    with lock:
+                        active_replacement_clocks -= 1
+                return FakeMediaClock()
+
+            return LiveStreamReader(
+                source_factory=source_factory,
+                capture_factory=lambda source: ContinuousCapture(source),
+                recovery=StreamRecovery(0.1, 0.1),
+                state_callback=lambda **event: states[label].append(event),
+                media_clock_factory=media_clock_factory,
+                media_clock_validator=lambda *_args: True,
+                capture_position_milliseconds=lambda cap: cap.get(0),
+                connection_max_age_seconds=0.15,
+                connection_renewal_lead_seconds=0.05,
+            )
+
+        readers = [make_reader("left"), make_reader("right")]
+        for reader in readers:
+            reader.start()
+        try:
+            self.assertTrue(entered_clock.wait(1.0))
+            time.sleep(0.05)
+            with lock:
+                self.assertEqual(maximum_active_replacement_clocks, 1)
+            release_clock.set()
+            self.assertTrue(self.wait_until(lambda: all(
+                any(event["state"] == "renewed" for event in states[label])
+                for label in states
+            )))
+            with lock:
+                self.assertEqual(maximum_active_replacement_clocks, 1)
+        finally:
+            release_clock.set()
+            for reader in readers:
+                reader.stop(timeout=2.0)
+
     def test_proactive_renewal_age_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "must be positive"):
             LiveStreamReader(

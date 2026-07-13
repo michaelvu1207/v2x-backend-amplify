@@ -16,6 +16,9 @@ import time
 from runtime_health import sanitize_source_error
 
 
+_PROACTIVE_PREPARATION_SEMAPHORE = threading.Semaphore(1)
+
+
 class _ProactiveRenewal(Exception):
     """Internal control flow for rotating a signed source before expiry."""
 
@@ -82,6 +85,7 @@ class _AsyncCapturePreparation:
         stop_event,
         wall_time,
         monotonic,
+        serialize_preparation=True,
     ):
         self._source_factory = source_factory
         self._clock_source_factory = clock_source_factory
@@ -93,6 +97,7 @@ class _AsyncCapturePreparation:
         self._stop_event = stop_event
         self._wall_time = wall_time
         self._monotonic = monotonic
+        self._serialize_preparation = bool(serialize_preparation)
         self._done = threading.Event()
         self._discarded = threading.Event()
         self._result_lock = threading.Lock()
@@ -114,7 +119,18 @@ class _AsyncCapturePreparation:
     def _run(self):
         capture = None
         clock_resolution = None
+        preparation_slot_acquired = False
         try:
+            if self._serialize_preparation:
+                self._set_stage("preparation_slot")
+                while not (
+                    self._stop_event.is_set() or self._discarded.is_set()
+                ):
+                    if _PROACTIVE_PREPARATION_SEMAPHORE.acquire(timeout=0.05):
+                        preparation_slot_acquired = True
+                        break
+                if not preparation_slot_acquired:
+                    raise RuntimeError("capture preparation stopped")
             self._set_stage("source")
             source = self._source_factory()
             capture_source = source
@@ -239,6 +255,8 @@ class _AsyncCapturePreparation:
             self._media_frame_identity = None
             if capture is not None:
                 capture.release()
+            if preparation_slot_acquired:
+                _PROACTIVE_PREPARATION_SEMAPHORE.release()
             self._done.set()
 
     def poll(self):
@@ -747,7 +765,7 @@ class LiveStreamReader:
         self._recent_frame_identities.append(identity)
         self._recent_frame_identity_set.add(identity)
 
-    def _prepare_replacement_capture(self):
+    def _prepare_replacement_capture(self, *, urgent=False):
         return _AsyncCapturePreparation(
             self.source_factory,
             self.media_clock_source_factory,
@@ -759,6 +777,7 @@ class LiveStreamReader:
             self._stop_event,
             self.wall_time,
             self.monotonic,
+            serialize_preparation=not urgent,
         )
 
     def _prepare_same_session_restart(
@@ -819,7 +838,9 @@ class LiveStreamReader:
             method = "same_session_restart"
             may_start_fresh_attempt = True
         else:
-            candidate = preparation or self._prepare_replacement_capture()
+            candidate = preparation or self._prepare_replacement_capture(
+                urgent=True
+            )
             method = (
                 "proactive_replacement"
                 if preparation is not None
@@ -845,7 +866,7 @@ class LiveStreamReader:
                 ):
                     return finish(None, "failed", method, failed_stage)
                 may_start_fresh_attempt = False
-                candidate = self._prepare_replacement_capture()
+                candidate = self._prepare_replacement_capture(urgent=True)
                 method = "fresh_session_replacement"
                 continue
 

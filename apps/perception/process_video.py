@@ -445,6 +445,7 @@ class FrameBroadcaster:
         if stage not in {
             None,
             "source",
+            "preparation_slot",
             "clock_source",
             "capture_open",
             "first_frame",
