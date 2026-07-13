@@ -331,17 +331,24 @@ class FfmpegNvdecCapture:
     def release(self):
         self._cancel_watcher_stop.set()
         self._opened = False
+        cleanup_error = None
         capture, self._capture = self._capture, None
         if capture is not None:
-            capture.release()
+            try:
+                capture.release()
+            except Exception as exc:
+                cleanup_error = exc
 
         with self._process_lock:
-            process, self._process = self._process, None
+            process = self._process
         if process is not None and process.poll() is None:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
                 process.wait(timeout=3)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+            except subprocess.TimeoutExpired:
                 if process.poll() is None:
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
@@ -350,17 +357,30 @@ class FfmpegNvdecCapture:
                     try:
                         process.wait(timeout=3)
                     except subprocess.TimeoutExpired:
-                        pass
+                        if process.poll() is None:
+                            cleanup_error = NvdecCaptureError(
+                                "NVDEC FFmpeg process did not exit"
+                            )
 
-        if self._memfd is not None:
+        process_dead = process is None or process.poll() is not None
+        if process_dead:
+            with self._process_lock:
+                if self._process is process:
+                    self._process = None
+
+        if process_dead and self._memfd is not None:
             try:
                 os.close(self._memfd)
             except OSError:
                 pass
             self._memfd = None
-        temporary, self._temporary_directory = self._temporary_directory, None
-        if temporary is not None:
-            temporary.cleanup()
+        if process_dead:
+            temporary, self._temporary_directory = (
+                self._temporary_directory,
+                None,
+            )
+            if temporary is not None:
+                temporary.cleanup()
         watcher, self._cancel_watcher = self._cancel_watcher, None
         if (
             watcher is not None
@@ -368,6 +388,8 @@ class FfmpegNvdecCapture:
             and watcher.is_alive()
         ):
             watcher.join(timeout=0.2)
+        if cleanup_error is not None:
+            raise cleanup_error
 
     def _watch_for_cancel(self):
         while not self._cancel_watcher_stop.is_set():

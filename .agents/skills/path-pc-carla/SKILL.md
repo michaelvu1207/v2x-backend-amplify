@@ -9,7 +9,7 @@ Treat this file as an operating procedure, not proof of current state. Re-run th
 
 ## Newest perception release chronology
 
-Observed through 2026-07-13 03:29 UTC; verify rather than assume. These items
+Observed through 2026-07-13 04:58 UTC; verify rather than assume. These items
 override every older PR 32/candidate statement below.
 
 - Live production remains the verified PR 35 rollback
@@ -28,22 +28,49 @@ override every older PR 32/candidate statement below.
   The only allowed next gate is an in-place, zero-overlap perception replacement
   with a pre/post CARLA fingerprint; abort on any additional restart,
   Vulkan/OOM signature, or less than 3 GiB free.
+- PR 39 merged as canonical
+  `56199fedae0ffe8ad832f5381840fc26e7b3c495`. Its zero-overlap controlled
+  startup passed upload-disabled and upload-enabled readiness, two four-feed
+  rounds in each mode, fresh trusted schema-v2 persistence, Richmond/LIVE/zero
+  sessions, and a deliberate clean perception stop in two seconds. The first
+  post-start pre-hour safety monitor later exited its decoder/headroom gate
+  before producing a pass artifact. The exact subcondition was not durably
+  retained,
+  so do not overstate it as a measured outage; the topology could still own four
+  active readers, one proactive replacement reader, and two exact fragment
+  decoders. PR 39 was immediately rolled back to PR 35 with four trusted feeds
+  and all timers restored. Evidence and rollback are at
+  `/home/path/V2XCarla/v2x-evidence/perception/20260713T034307Z-pr39-controlled-startup/`
+  and
+  `/home/path/V2XCarla/v2x-backend-backups/v2x-rollback-20260713T034307Z-pr39-terminal-recovery/`.
+  Do not redeploy `56199fe` unchanged.
 - The newest isolated terminal-recovery candidate is
-  `90b40441bbb7d0f6cb27d615cca1eefab8fd587b`. It retains signed capture and
-  clock URLs only inside one reader, exposes secret-safe stage/evidence
-  telemetry, and never accepts a prior decoder cursor or prior clock as a new
-  anchor. A same-session restart must match a unique contiguous sequence of
-  three distinct exact full-frame identities with decoder-time delta agreement
-  within 1 ms, or obtain one unique exact match from the bounded HLS fragment
-  window. Missing, duplicate, cancelled, late, or validator-rejected evidence
-  fails closed. Discard propagates through HTTP, fragment matching, and FFmpeg;
-  SIGTERM stops readers cooperatively; HTTP worker threads are daemonized; and
-  the URL-free fragment executors are explicitly quiesced on shutdown. Normal
-  and urgent exact-match pools share one cancellable two-decoder admission cap,
-  so overlapping clock work cannot add more than two fragment decoders beside
-  the four live readers. The tracked capture/clock fragment defaults are
-  two/four. No freshness, clock, inference, duplicate-frame, or zero-reconnect
-  threshold is weakened.
+  `b788faa4e0ae0faa5d468596e79c398790a28803`. It retains signed capture and
+  clock URLs only inside one reader, exposes secret-safe stage/evidence plus
+  process-wide decoder-topology telemetry, and never accepts a prior decoder
+  cursor or prior clock as a new anchor. A same-session restart must match a
+  unique contiguous sequence of three distinct exact full-frame identities
+  with decoder-time delta agreement within 1 ms, or obtain one unique exact
+  match from the bounded HLS fragment window. Missing, duplicate, cancelled,
+  late, or validator-rejected evidence fails closed.
+- All proactive captures and normal/urgent fragment decoders now share one
+  priority-aware two-permit auxiliary budget. A proactive capture holds its
+  permit through old-reader teardown and handover; terminal recovery closes the
+  failed active reader first, blocks new proactive registration, cancels the
+  current global proactive set, and holds urgent priority across its complete
+  fragment batch. At most four active readers plus two auxiliary decoders may
+  exist. A slow old capture, candidate, nested clock resolver, or FFmpeg child
+  is asynchronously quarantined and remains counted; the same reader cannot
+  reopen until its non-admitted decoder is confirmed dead. Failover outcome is
+  reported at the fixed deadline rather than waiting for slow cleanup.
+- FFmpeg teardown no longer drops a live child handle or reports success after
+  TERM and KILL both time out. It retains the process and temporary resources,
+  records a cleanup failure, and fails closed; OpenCV teardown errors do not
+  skip child termination. Pipeline shutdown unbounded-joins any reader that
+  outlives the soft stop deadline and waits for every tracked cleanup, leaving
+  systemd's service timeout as the final cgroup kill boundary rather than
+  allowing an orphaned decoder. No freshness, clock, inference, duplicate-
+  frame, or zero-reconnect threshold is weakened.
 - The last four-camera NVDEC recovery proof ran on functional failover commit
   `791676c`: two sequential forced-reader cycles recovered ch1-ch4 eight times
   with zero not-ready samples. Six recoveries used the exact three-frame
@@ -52,11 +79,17 @@ override every older PR 32/candidate statement below.
   inference advanced, and final readiness/media-clock readiness were true.
   That transient service did not stop cleanly because it predates the final
   cooperative shutdown changes, so it is recovery evidence only. Candidate
-  `90b4044` passes 154 perception, 241 Python-3.10 bridge, 23 recovery-
-  infrastructure, and 132 web tests plus zero Svelte diagnostics and the web
-  production build. A one-camera runtime attempt correctly exited because the
-  production pipeline requires one detector per configured source; do not
-  weaken that invariant or count the attempt as canary proof.
+  `b788faa` passes 173 perception tests; its inherited base passes 241
+  Python-3.10 bridge, 23 recovery-infrastructure, and 132 web tests plus zero
+  Svelte diagnostics and the web production build. The strict deadline,
+  cancellation-insensitive resolver, claimed-handover, urgent-batch,
+  four-reader/six-decoder, same-reader quarantine, shutdown, and stubborn-child
+  adversarial cases all pass; an independent final-code review found no
+  remaining hard blocker. Fable review is still unavailable because Claude CLI
+  authentication expires before file access, so do not claim a Fable pass. A
+  one-camera runtime attempt correctly exited because the production pipeline
+  requires one detector per configured source; do not weaken that invariant or
+  count the attempt as canary proof.
 - Candidate `49ac21b` and its PR49 single-frame ring proof are superseded and
   rejected for release: one exact frame can be ambiguous in static imagery and
   the prior-clock cursor shortcut was not independent re-anchor evidence. Keep

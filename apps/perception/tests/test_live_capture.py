@@ -1,4 +1,5 @@
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import threading
 import time
@@ -10,7 +11,16 @@ sys.path.insert(0, str(PERCEPTION_DIR))
 
 from live_capture import (  # noqa: E402
     LiveStreamReader,
+    _AsyncCapturePreparation,
     _AsyncMediaClockResolution,
+    _begin_terminal_recovery,
+    _cancel_proactive_preparations,
+    capture_preparation_topology,
+)
+from decoder_admission import AUXILIARY_DECODER_ADMISSION  # noqa: E402
+from kinesis_utils import (  # noqa: E402
+    _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR,
+    _run_nvdec_fragment_match,
 )
 from runtime_health import StreamRecovery  # noqa: E402
 
@@ -172,6 +182,642 @@ class LiveStreamReaderTests(unittest.TestCase):
         resolution.join(1.0)
         self.assertTrue(exited.is_set())
         self.assertFalse(resolution.is_alive())
+
+    def test_proactive_decoder_lease_is_held_until_atomic_adoption(self):
+        capture = PositionedScriptedCapture(["frame"], [0.0])
+        preparation = _AsyncCapturePreparation(
+            source_factory=lambda: "capture-source",
+            clock_source_factory=None,
+            capture_factory=lambda _source: capture,
+            media_clock_factory=None,
+            media_clock_validator=None,
+            capture_position_milliseconds=lambda cap: cap.get(0),
+            media_frame_identity=lambda frame: frame,
+            stop_event=threading.Event(),
+            wall_time=time.time,
+            monotonic=time.monotonic,
+            reserve_decoder_slot=True,
+        )
+        self.assertTrue(self.wait_until(lambda: preparation.poll()[0]))
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 1
+        )
+        result = preparation.take()
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 1
+        )
+        lock = threading.Lock()
+        active_matches = 0
+        maximum_matches = 0
+
+        def matcher(value):
+            nonlocal active_matches, maximum_matches
+            with lock:
+                active_matches += 1
+                maximum_matches = max(maximum_matches, active_matches)
+            try:
+                time.sleep(0.03)
+                return value
+            finally:
+                with lock:
+                    active_matches -= 1
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(
+                _run_nvdec_fragment_match,
+                matcher,
+                (value,),
+                {},
+            ) for value in range(3)]
+            self.assertEqual(
+                [future.result(timeout=1.0) for future in futures],
+                [0, 1, 2],
+            )
+        self.assertEqual(maximum_matches, 1)
+        preparation.adopt()
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 0
+        )
+        result[0].release()
+
+    def test_global_cancel_cannot_release_a_claimed_handover_lease(self):
+        capture = PositionedScriptedCapture(["frame"], [0.0])
+        preparation = _AsyncCapturePreparation(
+            source_factory=lambda: "capture-source",
+            clock_source_factory=None,
+            capture_factory=lambda _source: capture,
+            media_clock_factory=None,
+            media_clock_validator=None,
+            capture_position_milliseconds=lambda cap: cap.get(0),
+            media_frame_identity=lambda frame: frame,
+            stop_event=threading.Event(),
+            wall_time=time.time,
+            monotonic=time.monotonic,
+            reserve_decoder_slot=True,
+        )
+        self.assertTrue(self.wait_until(lambda: preparation.poll()[0]))
+        result = preparation.take()
+        self.assertIsNotNone(result)
+
+        self.assertFalse(_cancel_proactive_preparations(timeout=0.02))
+        self.assertFalse(capture.released)
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 1
+        )
+
+        preparation.adopt()
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 0
+        )
+        result[0].release()
+
+    def test_terminal_window_rejects_new_proactive_registration(self):
+        capture_factory_called = threading.Event()
+        terminal_window = _begin_terminal_recovery()
+        try:
+            preparation = _AsyncCapturePreparation(
+                source_factory=lambda: "capture-source",
+                clock_source_factory=None,
+                capture_factory=lambda _source: (
+                    capture_factory_called.set()
+                    or PositionedScriptedCapture(["frame"], [0.0])
+                ),
+                media_clock_factory=None,
+                media_clock_validator=None,
+                capture_position_milliseconds=lambda cap: cap.get(0),
+                media_frame_identity=lambda frame: frame,
+                stop_event=threading.Event(),
+                wall_time=time.time,
+                monotonic=time.monotonic,
+                reserve_decoder_slot=True,
+            )
+            preparation.join(1.0)
+            self.assertFalse(preparation.is_alive())
+            self.assertTrue(preparation.poll()[2])
+            self.assertFalse(capture_factory_called.is_set())
+            self.assertTrue(preparation.is_quiesced())
+            self.assertEqual(
+                AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 0
+            )
+        finally:
+            terminal_window.release()
+
+    def test_discarded_ready_preparation_closes_capture_and_releases_lease(self):
+        capture = PositionedScriptedCapture(["frame"], [0.0])
+        preparation = _AsyncCapturePreparation(
+            source_factory=lambda: "capture-source",
+            clock_source_factory=None,
+            capture_factory=lambda _source: capture,
+            media_clock_factory=None,
+            media_clock_validator=None,
+            capture_position_milliseconds=lambda cap: cap.get(0),
+            media_frame_identity=lambda frame: frame,
+            stop_event=threading.Event(),
+            wall_time=time.time,
+            monotonic=time.monotonic,
+            reserve_decoder_slot=True,
+        )
+        self.assertTrue(self.wait_until(lambda: preparation.poll()[0]))
+        preparation.discard()
+        self.assertTrue(capture.released)
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 0
+        )
+
+    def test_global_terminal_cancel_quiesces_proactive_clock_resolver(self):
+        resolver_entered = threading.Event()
+        resolver_exited = threading.Event()
+
+        def resolve_clock(_source, *_args, cancel_event=None):
+            resolver_entered.set()
+            cancel_event.wait(1.0)
+            resolver_exited.set()
+            return None
+
+        preparation = _AsyncCapturePreparation(
+            source_factory=lambda: "capture-source",
+            clock_source_factory=lambda: "clock-source",
+            capture_factory=lambda _source: ContinuousCapture("prepared"),
+            media_clock_factory=resolve_clock,
+            media_clock_validator=lambda *_args: True,
+            capture_position_milliseconds=lambda cap: cap.get(0),
+            media_frame_identity=lambda frame: frame,
+            stop_event=threading.Event(),
+            wall_time=time.time,
+            monotonic=time.monotonic,
+            reserve_decoder_slot=True,
+        )
+        self.assertTrue(resolver_entered.wait(1.0))
+        self.assertTrue(_cancel_proactive_preparations(timeout=1.0))
+        self.assertTrue(resolver_exited.is_set())
+        self.assertFalse(preparation.is_alive())
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 0
+        )
+
+    def test_failed_reader_release_is_inside_terminal_deadline(self):
+        captures = []
+        states = []
+        terminal_capture_counts = []
+
+        class SlowReleaseCapture(ScriptedCapture):
+            def release(self):
+                time.sleep(0.25)
+                super().release()
+
+        def capture_factory(_source):
+            capture = (
+                SlowReleaseCapture(["primary"])
+                if not captures
+                else ContinuousCapture("replacement")
+            )
+            capture.get = lambda _property: 0.0
+            captures.append(capture)
+            return capture
+
+        def state_callback(**event):
+            states.append(event)
+            if event["state"] == "terminal_failover_failed":
+                terminal_capture_counts.append(len(captures))
+
+        reader = LiveStreamReader(
+            source_factory=lambda: "signed-session",
+            capture_factory=capture_factory,
+            recovery=StreamRecovery(0.1, 0.1),
+            state_callback=state_callback,
+            media_clock_factory=lambda *_args: FakeMediaClock(),
+            media_clock_validator=lambda *_args: True,
+            capture_position_milliseconds=lambda cap: cap.get(0),
+            terminal_read_failover_seconds=0.05,
+        )
+        reader.start()
+        try:
+            self.assertIsNotNone(reader.wait_for_frame(0, timeout=1.0))
+            self.assertTrue(self.wait_until(lambda: any(
+                event["state"] == "terminal_failover_failed"
+                for event in states
+            )), states)
+            terminal = next(
+                event for event in states
+                if event["state"] == "terminal_failover_failed"
+            )
+            self.assertEqual(terminal["stage"], "old_capture_release")
+            self.assertGreaterEqual(terminal["delay_seconds"], 0.05)
+            self.assertLess(terminal["delay_seconds"], 0.15)
+            self.assertEqual(terminal_capture_counts, [1])
+        finally:
+            reader.stop(timeout=2.0)
+
+    def test_reader_does_not_reopen_until_quarantined_capture_is_dead(self):
+        captures = []
+        release_finished = threading.Event()
+        replacement_opened = threading.Event()
+        opened_before_release = []
+
+        class SlowPrimary(ScriptedCapture):
+            def release(self):
+                time.sleep(0.15)
+                super().release()
+                release_finished.set()
+
+        def capture_factory(_source):
+            if not captures:
+                capture = SlowPrimary(["primary"])
+            else:
+                opened_before_release.append(not release_finished.is_set())
+                replacement_opened.set()
+                capture = ContinuousCapture("replacement")
+            capture.get = lambda _property: 0.0
+            captures.append(capture)
+            return capture
+
+        reader = LiveStreamReader(
+            source_factory=lambda: "signed-session",
+            capture_factory=capture_factory,
+            recovery=StreamRecovery(0.01, 0.01),
+            media_clock_factory=lambda *_args: FakeMediaClock(),
+            media_clock_validator=lambda *_args: True,
+            capture_position_milliseconds=lambda cap: cap.get(0),
+            terminal_read_failover_seconds=0.02,
+        )
+        reader.start()
+        try:
+            self.assertIsNotNone(reader.wait_for_frame(0, timeout=1.0))
+            self.assertTrue(replacement_opened.wait(1.0))
+            self.assertEqual(opened_before_release, [False])
+        finally:
+            reader.stop(timeout=2.0)
+
+    def test_terminal_recovery_rejects_success_completed_after_deadline(self):
+        events = []
+
+        class LateCandidate:
+            def __init__(self):
+                self.discarded = False
+                self.joined = False
+
+            def poll(self):
+                time.sleep(0.06)
+                return True, ("late-result",), False
+
+            def take(self):
+                return ("late-result",)
+
+            def stage(self):
+                return "ready"
+
+            def evidence(self):
+                return "late"
+
+            def discard(self):
+                self.discarded = True
+
+            def join(self, timeout=None):
+                self.joined = True
+
+        candidate = LateCandidate()
+        reader = LiveStreamReader(
+            source_factory=lambda: "unused",
+            capture_factory=lambda _source: None,
+            recovery=StreamRecovery(0.1, 0.1),
+            state_callback=lambda **event: events.append(event),
+            terminal_read_failover_seconds=0.05,
+        )
+        result = reader._recover_terminal_read(
+            candidate, None, None, None, None,
+            started=time.monotonic(),
+        )
+
+        self.assertIsNone(result)
+        self.assertTrue(candidate.discarded)
+        self.assertTrue(candidate.joined)
+        terminal = next(
+            event for event in events
+            if event["state"] == "terminal_failover_failed"
+        )
+        self.assertTrue(terminal["stage"].startswith("deadline_exceeded:"))
+        self.assertGreaterEqual(terminal["delay_seconds"], 0.05)
+
+    def test_terminal_recovery_rejects_handover_that_crosses_deadline(self):
+        capture = PositionedScriptedCapture(["frame"], [0.0])
+        events = []
+
+        class SlowTakeCandidate:
+            def poll(self):
+                return True, (capture,), False
+
+            def take(self):
+                time.sleep(0.06)
+                return (capture,)
+
+            def stage(self):
+                return "ready"
+
+            def evidence(self):
+                return "slow-handover"
+
+            def discard(self):
+                capture.release()
+
+            def join(self, timeout=None):
+                return None
+
+        reader = LiveStreamReader(
+            source_factory=lambda: "unused",
+            capture_factory=lambda _source: None,
+            recovery=StreamRecovery(0.1, 0.1),
+            state_callback=lambda **event: events.append(event),
+            terminal_read_failover_seconds=0.05,
+        )
+        result = reader._recover_terminal_read(
+            SlowTakeCandidate(), None, None, None, None,
+            started=time.monotonic(),
+        )
+
+        self.assertIsNone(result)
+        self.assertTrue(capture.released)
+        terminal = next(
+            event for event in events
+            if event["state"] == "terminal_failover_failed"
+        )
+        self.assertEqual(
+            terminal["stage"], "deadline_exceeded:handover"
+        )
+
+    def test_terminal_timeout_quiesces_candidate_before_failure_callback(self):
+        callback_saw_joined = []
+
+        class TimedOutCandidate:
+            def __init__(self):
+                self.discarded = False
+                self.joined = False
+
+            def poll(self):
+                return False, None, False
+
+            def stage(self):
+                return "capture_open"
+
+            def discard(self):
+                self.discarded = True
+
+            def join(self, timeout=None):
+                self.joined = True
+
+        candidate = TimedOutCandidate()
+
+        def state_callback(**event):
+            if event["state"] == "terminal_failover_failed":
+                callback_saw_joined.append(candidate.joined)
+
+        reader = LiveStreamReader(
+            source_factory=lambda: "unused",
+            capture_factory=lambda _source: None,
+            recovery=StreamRecovery(0.1, 0.1),
+            state_callback=state_callback,
+            terminal_read_failover_seconds=0.02,
+        )
+        result = reader._recover_terminal_read(
+            candidate, None, None, None, None,
+            started=time.monotonic(),
+        )
+
+        self.assertIsNone(result)
+        self.assertTrue(candidate.discarded)
+        self.assertTrue(candidate.joined)
+        self.assertEqual(callback_saw_joined, [True])
+
+    def test_slow_terminal_cleanup_is_quarantined_inside_wall_bound(self):
+        cleanup_started = threading.Event()
+        cleanup_finished = threading.Event()
+
+        class SlowCleanupCandidate:
+            def poll(self):
+                return False, None, False
+
+            def stage(self):
+                return "capture_open"
+
+            def discard(self):
+                cleanup_started.set()
+
+            def join(self, timeout=None):
+                time.sleep(0.25)
+                cleanup_finished.set()
+
+        reader = LiveStreamReader(
+            source_factory=lambda: "unused",
+            capture_factory=lambda _source: None,
+            recovery=StreamRecovery(0.1, 0.1),
+            terminal_read_failover_seconds=0.02,
+        )
+        started = time.monotonic()
+        result = reader._recover_terminal_read(
+            SlowCleanupCandidate(), None, None, None, None,
+            started=started,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertIsNone(result)
+        self.assertTrue(cleanup_started.is_set())
+        self.assertFalse(cleanup_finished.is_set())
+        self.assertLess(elapsed, 0.10)
+        self.assertEqual(
+            capture_preparation_topology()["terminal_cleanups"], 1
+        )
+        self.assertEqual(len(reader._pending_terminal_cleanups), 1)
+        self.assertTrue(reader._wait_for_terminal_cleanups())
+        self.assertTrue(cleanup_finished.is_set())
+        self.assertEqual(
+            capture_preparation_topology()["terminal_cleanups"], 0
+        )
+
+    def test_slow_nested_resolver_is_tracked_until_it_quiesces(self):
+        resolver_entered = threading.Event()
+        resolver_exited = threading.Event()
+
+        def resolve_clock(_source, *_args, cancel_event=None):
+            resolver_entered.set()
+            time.sleep(0.25)
+            resolver_exited.set()
+            return None
+
+        preparation = _AsyncCapturePreparation(
+            source_factory=lambda: "capture-source",
+            clock_source_factory=lambda: "clock-source",
+            capture_factory=lambda _source: ContinuousCapture("prepared"),
+            media_clock_factory=resolve_clock,
+            media_clock_validator=lambda *_args: True,
+            capture_position_milliseconds=lambda cap: cap.get(0),
+            media_frame_identity=lambda frame: frame,
+            stop_event=threading.Event(),
+            wall_time=time.time,
+            monotonic=time.monotonic,
+            reserve_decoder_slot=True,
+        )
+        self.assertTrue(resolver_entered.wait(1.0))
+        reader = LiveStreamReader(
+            source_factory=lambda: "unused",
+            capture_factory=lambda _source: None,
+            recovery=StreamRecovery(0.1, 0.1),
+            terminal_read_failover_seconds=0.02,
+        )
+        started = time.monotonic()
+        result = reader._recover_terminal_read(
+            preparation, None, None, None, None,
+            started=started,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 0.10)
+        self.assertFalse(resolver_exited.is_set())
+        self.assertEqual(
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"], 1
+        )
+        topology = capture_preparation_topology()
+        self.assertEqual(topology["proactive_preparations"], 1)
+        self.assertEqual(topology["terminal_cleanups"], 1)
+
+        self.assertTrue(resolver_exited.wait(1.0))
+        self.assertTrue(self.wait_until(lambda: (
+            AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"] == 0
+            and capture_preparation_topology()["proactive_preparations"] == 0
+            and capture_preparation_topology()["terminal_cleanups"] == 0
+        )))
+
+    def test_simultaneous_terminal_restarts_stay_inside_decoder_budget(self):
+        lock = threading.Lock()
+        capture_active = 0
+        fragment_active = 0
+        maximum_total = 0
+        primary_frames = 0
+        replacement_captures = 0
+        all_primaries_ready = threading.Event()
+        all_replacements_ready = threading.Event()
+        readers = []
+        states = [[], [], [], []]
+
+        def record_total():
+            nonlocal maximum_total
+            maximum_total = max(
+                maximum_total,
+                capture_active + fragment_active,
+            )
+
+        class CountedCapture:
+            def __init__(self, label, primary):
+                nonlocal capture_active, replacement_captures
+                self.label = label
+                self.primary = primary
+                self.count = 0
+                self.released = False
+                with lock:
+                    capture_active += 1
+                    if not primary:
+                        replacement_captures += 1
+                        if replacement_captures == 4:
+                            all_replacements_ready.set()
+                    record_total()
+
+            def isOpened(self):
+                return not self.released
+
+            def read(self):
+                nonlocal primary_frames
+                if self.released:
+                    return False, None
+                if self.primary and self.count >= 1:
+                    all_primaries_ready.wait(1.0)
+                    return False, None
+                self.count += 1
+                if self.primary:
+                    with lock:
+                        primary_frames += 1
+                        if primary_frames == 4:
+                            all_primaries_ready.set()
+                return True, f"{self.label}-{self.count}"
+
+            def get(self, _property):
+                return float(self.count * 50)
+
+            def release(self):
+                nonlocal capture_active
+                with lock:
+                    if self.released:
+                        return
+                    self.released = True
+                    capture_active -= 1
+
+        def fragment_match(label):
+            nonlocal fragment_active
+            with lock:
+                fragment_active += 1
+                record_total()
+            try:
+                time.sleep(0.05)
+                return label
+            finally:
+                with lock:
+                    fragment_active -= 1
+
+        def make_reader(index):
+            captures = []
+
+            def capture_factory(_source):
+                capture = CountedCapture(
+                    f"reader-{index}",
+                    primary=not captures,
+                )
+                captures.append(capture)
+                return capture
+
+            def media_clock_factory(*_args, urgent=False, **_kwargs):
+                if urgent:
+                    self.assertTrue(all_replacements_ready.wait(1.0))
+                    futures = [
+                        _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR.submit(
+                            _run_nvdec_fragment_match,
+                            fragment_match,
+                            (f"{index}-{part}",),
+                            {},
+                            None,
+                            True,
+                        )
+                        for part in range(2)
+                    ]
+                    for future in futures:
+                        future.result(timeout=1.0)
+                return FakeMediaClock()
+
+            return LiveStreamReader(
+                source_factory=lambda: f"signed-{index}",
+                capture_factory=capture_factory,
+                recovery=StreamRecovery(0.1, 0.1),
+                state_callback=lambda **event: states[index].append(event),
+                media_clock_factory=media_clock_factory,
+                media_clock_validator=lambda *_args: True,
+                capture_position_milliseconds=lambda cap: cap.get(0),
+                terminal_read_failover_seconds=1.0,
+            )
+
+        readers = [make_reader(index) for index in range(4)]
+        for reader in readers:
+            reader.start()
+        try:
+            self.assertTrue(self.wait_until(lambda: all(any(
+                event["state"] == "terminal_failover_succeeded"
+                for event in reader_states
+            ) for reader_states in states)))
+            with lock:
+                self.assertEqual(maximum_total, 6)
+        finally:
+            for reader in readers:
+                reader.stop(timeout=2.0)
+        with lock:
+            self.assertEqual(capture_active, 0)
+            self.assertEqual(fragment_active, 0)
 
     def test_timed_out_terminal_capture_open_receives_cancellation(self):
         captures = []
@@ -375,6 +1021,7 @@ class LiveStreamReaderTests(unittest.TestCase):
         hold_replacement = threading.Event()
         fail_primary = threading.Event()
         release_fragment_match = threading.Event()
+        lifecycle = []
 
         class ReanchorableClock(FakeMediaClock):
             def __init__(self):
@@ -396,12 +1043,21 @@ class LiveStreamReaderTests(unittest.TestCase):
 
         def capture_factory(_source):
             if not captures:
+                lifecycle.append("primary_open")
                 capture = PositionedScriptedCapture(
                     ["shared-1", "shared-2", "shared-3"],
                     [0.0, 50.0, 100.0],
                     block_after_frames=fail_primary,
                 )
+                release = capture.release
+
+                def release_primary():
+                    lifecycle.append("primary_release")
+                    release()
+
+                capture.release = release_primary
             else:
+                lifecycle.append("replacement_open")
                 capture = PositionedScriptedCapture(
                     ["shared-1", "shared-2", "shared-3", "new-frame"],
                     [0.0, 50.0, 100.0, 150.0],
@@ -448,6 +1104,10 @@ class LiveStreamReaderTests(unittest.TestCase):
             self.assertEqual(terminal["stage"], "ready")
             self.assertEqual(
                 terminal["evidence"], "recent_exact_sequence"
+            )
+            self.assertLess(
+                lifecycle.index("primary_release"),
+                lifecycle.index("replacement_open"),
             )
         finally:
             fail_primary.set()

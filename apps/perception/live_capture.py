@@ -13,10 +13,193 @@ import math
 import threading
 import time
 
+from decoder_admission import (
+    acquire_auxiliary_decoder_slot,
+    begin_urgent_decoder_window,
+)
 from runtime_health import sanitize_source_error
 
 
 _PROACTIVE_PREPARATION_SEMAPHORE = threading.Semaphore(1)
+_PROACTIVE_PREPARATIONS = set()
+_PROACTIVE_PREPARATIONS_LOCK = threading.Lock()
+_TERMINAL_RECOVERIES = 0
+_TERMINAL_CLEANUPS = {}
+_TERMINAL_CLEANUPS_LOCK = threading.Lock()
+_TERMINAL_CLEANUP_FAILURES = 0
+
+
+class _AsyncTerminalCleanup:
+    """Run potentially blocking decoder teardown outside the failover clock."""
+
+    def __init__(self, key, action):
+        self.key = key
+        self._action = action
+        self._done = threading.Event()
+        self._succeeded = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def _run(self):
+        global _TERMINAL_CLEANUP_FAILURES
+        try:
+            self._action()
+            self._succeeded = True
+        except Exception:
+            self._succeeded = False
+        finally:
+            self._action = None
+            self._done.set()
+            with _TERMINAL_CLEANUPS_LOCK:
+                if not self._succeeded:
+                    _TERMINAL_CLEANUP_FAILURES += 1
+                if _TERMINAL_CLEANUPS.get(self.key) is self:
+                    _TERMINAL_CLEANUPS.pop(self.key, None)
+
+    def wait(self, timeout=None):
+        return self._done.wait(
+            None if timeout is None else max(0.0, float(timeout))
+        )
+
+    def succeeded(self):
+        return self._done.is_set() and self._succeeded
+
+
+def _start_terminal_cleanup(key, action):
+    with _TERMINAL_CLEANUPS_LOCK:
+        cleanup = _TERMINAL_CLEANUPS.get(key)
+        if cleanup is None:
+            cleanup = _AsyncTerminalCleanup(key, action)
+            _TERMINAL_CLEANUPS[key] = cleanup
+            cleanup.start()
+        return cleanup
+
+
+def _cleanup_candidate(candidate):
+    error = None
+    try:
+        candidate.discard()
+    except Exception as exc:
+        error = exc
+    try:
+        join = getattr(candidate, "join", None)
+        if join is not None:
+            join()
+        wait_quiesced = getattr(candidate, "wait_quiesced", None)
+        if wait_quiesced is not None:
+            wait_quiesced()
+    except Exception as exc:
+        if error is None:
+            error = exc
+    if error is not None:
+        raise error
+
+
+def _start_candidate_cleanup(candidate):
+    return _start_terminal_cleanup(
+        ("candidate", id(candidate)),
+        lambda: _cleanup_candidate(candidate),
+    )
+
+
+def wait_for_terminal_cleanups(timeout=None):
+    """Wait for all tracked teardown tasks; return false on timeout/failure."""
+    deadline = (
+        None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+    )
+    while True:
+        with _TERMINAL_CLEANUPS_LOCK:
+            cleanups = tuple(_TERMINAL_CLEANUPS.values())
+            failures = _TERMINAL_CLEANUP_FAILURES
+        if not cleanups:
+            return failures == 0
+        for cleanup in cleanups:
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            if not cleanup.wait(remaining):
+                return False
+
+
+def _register_proactive_preparation(preparation):
+    with _PROACTIVE_PREPARATIONS_LOCK:
+        if _TERMINAL_RECOVERIES > 0:
+            return False
+        _PROACTIVE_PREPARATIONS.add(preparation)
+        return True
+
+
+def _unregister_proactive_preparation(preparation):
+    with _PROACTIVE_PREPARATIONS_LOCK:
+        _PROACTIVE_PREPARATIONS.discard(preparation)
+
+
+def capture_preparation_topology():
+    """Return secret-free process-wide preparation counts for health evidence."""
+    with _PROACTIVE_PREPARATIONS_LOCK:
+        topology = {
+            "proactive_preparations": len(_PROACTIVE_PREPARATIONS),
+            "terminal_recoveries": _TERMINAL_RECOVERIES,
+        }
+    with _TERMINAL_CLEANUPS_LOCK:
+        topology["terminal_cleanups"] = len(_TERMINAL_CLEANUPS)
+        topology["terminal_cleanup_failures"] = _TERMINAL_CLEANUP_FAILURES
+    return topology
+
+
+class _TerminalRecoveryWindow:
+    """Block new proactive decoders and normal fragment work until release."""
+
+    def __init__(self, preparations, decoder_window):
+        self.preparations = preparations
+        self._decoder_window = decoder_window
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self):
+        global _TERMINAL_RECOVERIES
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        with _PROACTIVE_PREPARATIONS_LOCK:
+            if _TERMINAL_RECOVERIES < 1:
+                raise RuntimeError("terminal recovery window underflow")
+            _TERMINAL_RECOVERIES -= 1
+        self._decoder_window.release()
+
+
+def _begin_terminal_recovery():
+    global _TERMINAL_RECOVERIES
+    decoder_window = begin_urgent_decoder_window()
+    with _PROACTIVE_PREPARATIONS_LOCK:
+        _TERMINAL_RECOVERIES += 1
+        preparations = tuple(_PROACTIVE_PREPARATIONS)
+    return _TerminalRecoveryWindow(preparations, decoder_window)
+
+
+def _cancel_proactive_preparations(timeout=0.0, preparations=None):
+    """Cancel every off-path capture before terminal GPU work is admitted."""
+    owned_window = None
+    if preparations is None:
+        owned_window = _begin_terminal_recovery()
+        preparations = owned_window.preparations
+    try:
+        cleanups = [
+            _start_candidate_cleanup(preparation)
+            for preparation in preparations
+        ]
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for cleanup in cleanups:
+            cleanup.wait(max(0.0, deadline - time.monotonic()))
+        return all(cleanup.succeeded() for cleanup in cleanups)
+    finally:
+        if owned_window is not None:
+            owned_window.release()
 
 
 def _call_with_supported_kwargs(factory, *args, **kwargs):
@@ -90,8 +273,10 @@ class _AsyncMediaClockResolution:
     def discard(self):
         self._cancelled.set()
 
-    def join(self, timeout=0.0):
-        self._thread.join(max(0.0, float(timeout)))
+    def join(self, timeout=None):
+        self._thread.join(
+            None if timeout is None else max(0.0, float(timeout))
+        )
 
     def is_alive(self):
         return self._thread.is_alive()
@@ -113,6 +298,7 @@ class _AsyncCapturePreparation:
         wall_time,
         monotonic,
         serialize_preparation=True,
+        reserve_decoder_slot=False,
     ):
         self._source_factory = source_factory
         self._clock_source_factory = clock_source_factory
@@ -125,6 +311,15 @@ class _AsyncCapturePreparation:
         self._wall_time = wall_time
         self._monotonic = monotonic
         self._serialize_preparation = bool(serialize_preparation)
+        self._reserve_decoder_slot = bool(reserve_decoder_slot)
+        self._decoder_lease_lock = threading.Lock()
+        self._decoder_lease = None
+        self._registration_lock = threading.Lock()
+        self._registered_proactive = False
+        self._quiesced = threading.Event()
+        self._claimed = False
+        self._clock_resolution_lock = threading.Lock()
+        self._clock_resolution = None
         self._done = threading.Event()
         self._discarded = threading.Event()
         self._result_lock = threading.Lock()
@@ -134,7 +329,54 @@ class _AsyncCapturePreparation:
         self._stage_lock = threading.Lock()
         self._stage = "source"
         self._thread = threading.Thread(target=self._run, daemon=True)
+        if self._reserve_decoder_slot:
+            registered = _register_proactive_preparation(self)
+            with self._registration_lock:
+                self._registered_proactive = registered
+            if not registered:
+                self._discarded.set()
+                self._quiesced.set()
+        else:
+            self._quiesced.set()
         self._thread.start()
+
+    def _set_decoder_lease(self, lease):
+        with self._decoder_lease_lock:
+            self._decoder_lease = lease
+
+    def _release_decoder_lease(self):
+        with self._decoder_lease_lock:
+            lease, self._decoder_lease = self._decoder_lease, None
+        if lease is not None:
+            lease.release()
+
+    def _unregister(self):
+        with self._registration_lock:
+            registered = self._registered_proactive
+            self._registered_proactive = False
+        if registered:
+            _unregister_proactive_preparation(self)
+        self._quiesced.set()
+
+    def _track_clock_resolution(self, resolution):
+        with self._clock_resolution_lock:
+            self._clock_resolution = resolution
+
+    def _cancel_clock_resolution(self):
+        with self._clock_resolution_lock:
+            resolution = self._clock_resolution
+        if resolution is not None:
+            resolution.discard()
+
+    def _quiesce_clock_resolution(self):
+        with self._clock_resolution_lock:
+            resolution = self._clock_resolution
+        if resolution is not None:
+            resolution.discard()
+            resolution.join()
+            with self._clock_resolution_lock:
+                if self._clock_resolution is resolution:
+                    self._clock_resolution = None
 
     def _set_stage(self, stage):
         with self._stage_lock:
@@ -172,6 +414,15 @@ class _AsyncCapturePreparation:
                 else source
             )
             prepared_clock_source = clock_source
+            if self._reserve_decoder_slot:
+                self._set_stage("decoder_slot")
+                self._set_decoder_lease(acquire_auxiliary_decoder_slot(
+                    urgent=False,
+                    cancelled=lambda: (
+                        self._stop_event.is_set()
+                        or self._discarded.is_set()
+                    ),
+                ))
             self._set_stage("capture_open")
             capture = _call_with_supported_kwargs(
                 self._capture_factory,
@@ -234,6 +485,7 @@ class _AsyncCapturePreparation:
                             self._media_frame_identity,
                         ),
                     )
+                    self._track_clock_resolution(clock_resolution)
                     clock_source = None
                     self._set_stage("clock_resolution")
                 resolved, media_clock = clock_resolution.poll()
@@ -291,12 +543,21 @@ class _AsyncCapturePreparation:
             self._capture_position_milliseconds = None
             self._media_frame_identity = None
             if clock_resolution is not None:
-                clock_resolution.discard()
+                self._quiesce_clock_resolution()
             if capture is not None:
                 capture.release()
             if preparation_slot_acquired:
                 _PROACTIVE_PREPARATION_SEMAPHORE.release()
             self._done.set()
+            with self._result_lock:
+                retain_lease = (
+                    self._result is not None
+                    and not self._discarded.is_set()
+                    and not self._failed
+                )
+            if not retain_lease:
+                self._release_decoder_lease()
+                self._unregister()
 
     def poll(self):
         if not self._done.is_set():
@@ -307,17 +568,46 @@ class _AsyncCapturePreparation:
     def take(self):
         with self._result_lock:
             result, self._result = self._result, None
+            self._claimed = result is not None
             return result
+
+    def adopt(self):
+        """Promote a prepared capture after the old active reader is closed."""
+        with self._result_lock:
+            self._claimed = False
+        self._release_decoder_lease()
+        self._unregister()
 
     def discard(self):
         self._discarded.set()
+        self._cancel_clock_resolution()
         capture = None
         with self._result_lock:
             if self._result is not None:
                 capture = self._result[0]
                 self._result = None
+            claimed = self._claimed
         if capture is not None:
             capture.release()
+        if self._done.is_set() and not claimed:
+            self._release_decoder_lease()
+            self._unregister()
+
+    def join(self, timeout=None):
+        self._thread.join(
+            None if timeout is None else max(0.0, float(timeout))
+        )
+
+    def is_alive(self):
+        return self._thread.is_alive()
+
+    def wait_quiesced(self, timeout=None):
+        return self._quiesced.wait(
+            None if timeout is None else max(0.0, float(timeout))
+        )
+
+    def is_quiesced(self):
+        return self._quiesced.is_set()
 
 
 class _AsyncCaptureRestart:
@@ -376,6 +666,8 @@ class _AsyncCaptureRestart:
         self._monotonic = monotonic
         self._done = threading.Event()
         self._discarded = threading.Event()
+        self._clock_resolution_lock = threading.Lock()
+        self._clock_resolution = None
         self._result_lock = threading.Lock()
         self._result = None
         self._failed = False
@@ -395,6 +687,26 @@ class _AsyncCaptureRestart:
 
     def evidence(self):
         return self._success_evidence
+
+    def _track_clock_resolution(self, resolution):
+        with self._clock_resolution_lock:
+            self._clock_resolution = resolution
+
+    def _cancel_clock_resolution(self):
+        with self._clock_resolution_lock:
+            resolution = self._clock_resolution
+        if resolution is not None:
+            resolution.discard()
+
+    def _quiesce_clock_resolution(self):
+        with self._clock_resolution_lock:
+            resolution = self._clock_resolution
+        if resolution is not None:
+            resolution.discard()
+            resolution.join()
+            with self._clock_resolution_lock:
+                if self._clock_resolution is resolution:
+                    self._clock_resolution = None
 
     def _run(self):
         capture = None
@@ -554,6 +866,7 @@ class _AsyncCaptureRestart:
                             "urgent": True,
                         },
                     )
+                    self._track_clock_resolution(clock_resolution)
                     self._set_stage("clock_resolution")
                 if clock_resolution is None:
                     continue
@@ -561,7 +874,7 @@ class _AsyncCaptureRestart:
                 if not resolved:
                     continue
                 if media_clock is None:
-                    clock_resolution.discard()
+                    self._quiesce_clock_resolution()
                     clock_resolution = None
                     if resolution_source_index + 1 < len(resolution_sources):
                         resolution_source_index += 1
@@ -610,7 +923,7 @@ class _AsyncCaptureRestart:
             self._capture_position_milliseconds = None
             self._media_frame_identity = None
             if clock_resolution is not None:
-                clock_resolution.discard()
+                self._quiesce_clock_resolution()
             if capture is not None:
                 capture.release()
             self._done.set()
@@ -628,6 +941,7 @@ class _AsyncCaptureRestart:
 
     def discard(self):
         self._discarded.set()
+        self._cancel_clock_resolution()
         capture = None
         with self._result_lock:
             if self._result is not None:
@@ -635,6 +949,14 @@ class _AsyncCaptureRestart:
                 self._result = None
         if capture is not None:
             capture.release()
+
+    def join(self, timeout=None):
+        self._thread.join(
+            None if timeout is None else max(0.0, float(timeout))
+        )
+
+    def is_alive(self):
+        return self._thread.is_alive()
 
 
 def _bounded_bytes(value, limit=32_768):
@@ -752,6 +1074,7 @@ class LiveStreamReader:
         connection_renewal_lead_seconds=15.0,
         connection_initial_renewal_delay_seconds=0.0,
         terminal_read_failover_seconds=8.0,
+        reserve_proactive_decoder_slot=False,
     ):
         self.source_factory = source_factory
         self.capture_factory = capture_factory
@@ -812,9 +1135,13 @@ class LiveStreamReader:
                 "terminal_read_failover_seconds must be between 0 and 10"
             )
         self.terminal_read_failover_seconds = failover_seconds
+        self.reserve_proactive_decoder_slot = bool(
+            reserve_proactive_decoder_slot
+        )
 
         self._condition = threading.Condition()
         self._stop_event = threading.Event()
+        self._pending_terminal_cleanups = []
         self._thread = None
         self._sequence = 0
         self._latest = None
@@ -841,9 +1168,11 @@ class LiveStreamReader:
         with self._condition:
             self._condition.notify_all()
 
-    def join(self, timeout=1.0):
+    def join(self, timeout=None):
         if self._thread:
-            self._thread.join(timeout=max(0.0, float(timeout)))
+            self._thread.join(
+                None if timeout is None else max(0.0, float(timeout))
+            )
 
     def is_alive(self):
         return bool(self._thread and self._thread.is_alive())
@@ -907,6 +1236,9 @@ class LiveStreamReader:
             self.wall_time,
             self.monotonic,
             serialize_preparation=not urgent,
+            reserve_decoder_slot=(
+                self.reserve_proactive_decoder_slot and not urgent
+            ),
         )
 
     def _prepare_same_session_restart(
@@ -930,7 +1262,7 @@ class LiveStreamReader:
 
     def _recover_terminal_read(
         self, preparation, source, clock_source, prior_media_clock,
-        prior_capture_position,
+        prior_capture_position, started=None, failed_capture=None,
     ):
         """Return one fully validated replacement within a strict time bound.
 
@@ -940,13 +1272,120 @@ class LiveStreamReader:
         No unclocked frame is published, and failure to validate inside this
         bound falls through to the normal reconnect/staleness path.
         """
+        started = self.monotonic() if started is None else float(started)
+        deadline = started + self.terminal_read_failover_seconds
         if self.terminal_read_failover_seconds <= 0.0:
-            if preparation is not None:
-                preparation.discard()
+            self._cleanup_capture_until(failed_capture, deadline)
+            self._cleanup_candidate_until(preparation, deadline)
             return None
 
-        started = self.monotonic()
-        deadline = started + self.terminal_read_failover_seconds
+        old_capture_cleanup = (
+            None
+            if failed_capture is None
+            else _start_terminal_cleanup(
+                ("capture", id(failed_capture)), failed_capture.release
+            )
+        )
+        terminal_window = _begin_terminal_recovery()
+        try:
+            return self._recover_terminal_read_admitted(
+                preparation,
+                source,
+                clock_source,
+                prior_media_clock,
+                prior_capture_position,
+                started,
+                deadline,
+                terminal_window.preparations,
+                old_capture_cleanup,
+            )
+        finally:
+            terminal_window.release()
+
+    @staticmethod
+    def _discard_and_quiesce(candidate):
+        if candidate is None:
+            return True
+        cleanup = _start_candidate_cleanup(candidate)
+        cleanup.wait()
+        return cleanup.succeeded()
+
+    def _track_terminal_cleanup(self, cleanup):
+        if cleanup not in self._pending_terminal_cleanups:
+            self._pending_terminal_cleanups.append(cleanup)
+
+    def _wait_for_terminal_cleanups(self):
+        cleanups, self._pending_terminal_cleanups = (
+            self._pending_terminal_cleanups,
+            [],
+        )
+        succeeded = True
+        for cleanup in cleanups:
+            cleanup.wait()
+            succeeded = cleanup.succeeded() and succeeded
+        return succeeded
+
+    def _cleanup_candidate_until(self, candidate, deadline):
+        if candidate is None:
+            return True
+        cleanup = _start_candidate_cleanup(candidate)
+        cleanup.wait(max(0.0, deadline - self.monotonic()))
+        if cleanup.succeeded():
+            return True
+        self._track_terminal_cleanup(cleanup)
+        return False
+
+    def _cleanup_capture_until(self, capture, deadline):
+        if capture is None:
+            return True
+        cleanup = _start_terminal_cleanup(
+            ("capture", id(capture)), capture.release
+        )
+        cleanup.wait(max(0.0, deadline - self.monotonic()))
+        if cleanup.succeeded():
+            return True
+        self._track_terminal_cleanup(cleanup)
+        return False
+
+    def _cleanup_claimed_until(self, candidate, prepared, deadline):
+        preparation_candidate = isinstance(
+            candidate, _AsyncCapturePreparation
+        )
+
+        def release_claimed():
+            error = None
+            try:
+                prepared[0].release()
+            except Exception as exc:
+                error = exc
+            finally:
+                if preparation_candidate:
+                    candidate.adopt()
+            if error is not None:
+                raise error
+
+        cleanup = _start_terminal_cleanup(
+            ("claimed", id(candidate)), release_claimed
+        )
+        cleanup.wait(max(0.0, deadline - self.monotonic()))
+        if cleanup.succeeded():
+            return True
+        self._track_terminal_cleanup(cleanup)
+        return False
+
+    def _recover_terminal_read_admitted(
+        self,
+        preparation,
+        source,
+        clock_source,
+        prior_media_clock,
+        prior_capture_position,
+        started,
+        deadline,
+        proactive_preparations,
+        old_capture_cleanup,
+    ):
+        """Recover while new proactive and normal auxiliary work is blocked."""
 
         def finish(result, outcome, method, stage, evidence=None):
             elapsed = max(0.0, self.monotonic() - started)
@@ -959,9 +1398,54 @@ class LiveStreamReader:
             )
             return result
 
+        # A terminal replacement can safely reuse the two auxiliary GPU permits
+        # only after proactive captures release theirs. Cancellation is global
+        # because another camera may own the single serialized preparation.
+        quiesced = _cancel_proactive_preparations(
+            timeout=min(1.0, max(0.0, deadline - self.monotonic())),
+            preparations=proactive_preparations,
+        )
+        old_capture_released = True
+        if old_capture_cleanup is not None:
+            old_capture_cleanup.wait(
+                max(0.0, deadline - self.monotonic())
+            )
+            old_capture_released = old_capture_cleanup.succeeded()
+            if not old_capture_released:
+                self._track_terminal_cleanup(old_capture_cleanup)
+        if not old_capture_released:
+            return finish(
+                None,
+                "failed",
+                "same_session_restart",
+                "old_capture_release",
+            )
+        if not quiesced:
+            return finish(
+                None,
+                "failed",
+                "same_session_restart",
+                "proactive_quiescence",
+            )
+        if self.monotonic() >= deadline:
+            return finish(
+                None,
+                "failed",
+                "same_session_restart",
+                "preparation_deadline",
+            )
+
         if source is not None and clock_source is not None:
             if preparation is not None:
-                preparation.discard()
+                if not self._cleanup_candidate_until(
+                    preparation, deadline
+                ):
+                    return finish(
+                        None,
+                        "failed",
+                        "same_session_restart",
+                        "proactive_cleanup",
+                    )
             candidate = self._prepare_same_session_restart(
                 source, clock_source, prior_media_clock,
                 prior_capture_position,
@@ -985,13 +1469,45 @@ class LiveStreamReader:
         while not self._stop_event.is_set():
             done, result, failed = candidate.poll()
             if done:
-                if not failed and result is not None:
+                if self.monotonic() >= deadline:
+                    late_stage = candidate.stage()
+                    self._cleanup_candidate_until(candidate, deadline)
                     return finish(
-                        candidate.take(), "succeeded", method,
+                        None, "failed", method,
+                        f"deadline_exceeded:{late_stage}",
+                    )
+                if not failed and result is not None:
+                    prepared = candidate.take()
+                    if prepared is None:
+                        self._cleanup_candidate_until(candidate, deadline)
+                        return finish(
+                            None, "failed", method, "result_ownership"
+                        )
+                    preparation_candidate = isinstance(
+                        candidate, _AsyncCapturePreparation
+                    )
+                    if self.monotonic() >= deadline:
+                        self._cleanup_claimed_until(
+                            candidate, prepared, deadline
+                        )
+                        return finish(
+                            None, "failed", method,
+                            "deadline_exceeded:handover",
+                        )
+                    if preparation_candidate:
+                        # Terminal callers close the failed active reader before
+                        # entering recovery, so this capture fills that vacated
+                        # slot and no longer consumes the auxiliary budget.
+                        candidate.adopt()
+                    return finish(
+                        prepared, "succeeded", method,
                         candidate.stage(), candidate.evidence(),
                     )
                 failed_stage = candidate.stage()
-                candidate.discard()
+                if not self._cleanup_candidate_until(candidate, deadline):
+                    return finish(
+                        None, "failed", method, "candidate_cleanup"
+                    )
                 if (
                     not may_start_fresh_attempt
                     or self.monotonic() >= deadline
@@ -1005,15 +1521,24 @@ class LiveStreamReader:
             remaining = deadline - self.monotonic()
             if remaining <= 0.0:
                 timed_out_stage = candidate.stage()
-                candidate.discard()
+                self._cleanup_candidate_until(candidate, deadline)
                 return finish(None, "failed", method, timed_out_stage)
             self._stop_event.wait(min(0.01, remaining))
 
-        candidate.discard()
+        self._cleanup_candidate_until(candidate, deadline)
         return finish(None, "stopped", method, candidate.stage())
 
     def _run(self):
         while not self._stop_event.is_set():
+            if not self._wait_for_terminal_cleanups():
+                self._notify(
+                    "reconnecting",
+                    error="terminal decoder cleanup failed",
+                    delay_seconds=0.0,
+                )
+                while not self._stop_event.wait(0.5):
+                    pass
+                break
             now = self.monotonic()
             if not self.recovery.can_retry(now):
                 delay = max(0.0, self.recovery.next_retry_monotonic - now)
@@ -1024,6 +1549,7 @@ class LiveStreamReader:
             capture_source = None
             capture_clock_source = None
             proactive_preparation = None
+            clock_resolution = None
             try:
                 # Keep signed URLs only in the connection-local stack. The
                 # optional longer clock window is independent of the shortest
@@ -1073,6 +1599,7 @@ class LiveStreamReader:
                         )
 
                     prepared = None
+                    prepared_owner = None
                     if proactive_preparation is not None:
                         done, _result, failed = proactive_preparation.poll()
                         if done:
@@ -1085,18 +1612,23 @@ class LiveStreamReader:
                                 proactive_preparation = None
                                 renewal_deadline = self.monotonic() + 1.0
                             else:
-                                prepared = proactive_preparation.take()
+                                prepared_owner = proactive_preparation
+                                prepared = prepared_owner.take()
                                 proactive_preparation = None
 
                     if prepared is None:
                         ret, frame = cap.read()
                         if not ret or frame is None:
+                            terminal_started = self.monotonic()
+                            failed_capture, cap = cap, None
                             prepared = self._recover_terminal_read(
                                 proactive_preparation,
                                 capture_source,
                                 capture_clock_source,
                                 media_clock,
                                 last_capture_position,
+                                started=terminal_started,
+                                failed_capture=failed_capture,
                             )
                             proactive_preparation = None
                             if prepared is None:
@@ -1118,7 +1650,20 @@ class LiveStreamReader:
                             prepared_clock_source,
                         ) = prepared
                         previous, cap = cap, replacement
-                        previous.release()
+                        try:
+                            if previous is not None:
+                                previous.release()
+                        except Exception:
+                            # The new decoder cannot outlive its admission lease
+                            # when the old active reader failed to close.
+                            cap = None
+                            replacement.release()
+                            if prepared_owner is not None:
+                                prepared_owner.adopt()
+                            raise
+                        else:
+                            if prepared_owner is not None:
+                                prepared_owner.adopt()
                         media_clock = prepared_media_clock
                         capture_source = prepared_source
                         capture_clock_source = prepared_clock_source
@@ -1369,7 +1914,11 @@ class LiveStreamReader:
                 self._notify("reconnecting", error=error, delay_seconds=delay)
                 self._stop_event.wait(delay)
             finally:
+                if clock_resolution is not None:
+                    clock_resolution.discard()
+                    clock_resolution.join()
                 if proactive_preparation is not None:
-                    proactive_preparation.discard()
+                    self._discard_and_quiesce(proactive_preparation)
                 if cap is not None:
                     cap.release()
+        self._wait_for_terminal_cleanups()
