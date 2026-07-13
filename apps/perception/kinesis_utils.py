@@ -26,6 +26,11 @@ load_dotenv()
 # the unchanged 15-second freshness gate. Exact matching still covers every
 # fragment; the smaller pool changes scheduling only, not clock evidence.
 _NVDEC_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+# Terminal recovery must not wait behind proactive four-camera clock work. A
+# terminal reader has already lost its live decoder, so one reserved exact-match
+# worker replaces that freed slot without increasing the steady-state decoder
+# budget. It uses the same matcher and ambiguity gate as the normal pool.
+_NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 
 def _utc_iso(epoch):
@@ -255,6 +260,7 @@ def resolve_hls_media_clock(
     http_get=requests.get,
     fragment_matcher=_match_fragment_frame,
     not_before_media_time_utc=None,
+    urgent=False,
 ):
     """Match one decoded frame to its exact HLS PDT/fragment position.
 
@@ -336,8 +342,13 @@ def resolve_hls_media_clock(
         # sessions during a clock re-anchor.
         with ThreadPoolExecutor(max_workers=min(5, len(fragments))) as executor:
             downloaded = list(executor.map(download_fragment, fragments))
+        match_executor = (
+            _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR
+            if urgent
+            else _NVDEC_FRAGMENT_MATCH_EXECUTOR
+        )
         futures = [
-            _NVDEC_FRAGMENT_MATCH_EXECUTOR.submit(
+            match_executor.submit(
                 match_downloaded_fragment, fragment
             )
             for fragment in downloaded
@@ -392,6 +403,7 @@ def resolve_hls_media_clock_nvdec(
     frame_identity,
     timeout=10,
     not_before_media_time_utc=None,
+    urgent=False,
 ):
     """Resolve an exact clock using the same pixels as the NVDEC live reader."""
     return resolve_hls_media_clock(
@@ -402,6 +414,7 @@ def resolve_hls_media_clock_nvdec(
         timeout=timeout,
         fragment_matcher=match_fragment_frame_nvdec,
         not_before_media_time_utc=not_before_media_time_utc,
+        urgent=urgent,
     )
 
 def _camera_id_from_stream_name(stream_name):

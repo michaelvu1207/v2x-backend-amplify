@@ -420,7 +420,8 @@ class _AsyncCaptureRestart:
                         {
                             "not_before_media_time_utc": (
                                 self._prior_media_time_utc
-                            )
+                            ),
+                            "urgent": True,
                         },
                     )
                     self._set_stage("clock_resolution")

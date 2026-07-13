@@ -294,6 +294,7 @@ class LiveStreamReaderTests(unittest.TestCase):
         clocks = [PositionSensitiveClock(), FakeMediaClock(valid)]
         clock_calls = []
         lower_bounds = []
+        urgent_calls = []
 
         def capture_factory(source):
             if not captures:
@@ -305,10 +306,11 @@ class LiveStreamReaderTests(unittest.TestCase):
             return capture
 
         def media_clock_factory(
-            *_args, not_before_media_time_utc=None
+            *_args, not_before_media_time_utc=None, urgent=False
         ):
             clock_calls.append(_args)
             lower_bounds.append(not_before_media_time_utc)
+            urgent_calls.append(urgent)
             return clocks[min(len(clock_calls) - 1, 1)]
 
         reader = LiveStreamReader(
@@ -335,6 +337,7 @@ class LiveStreamReaderTests(unittest.TestCase):
             )
             self.assertEqual(len(clock_calls), 2)
             self.assertEqual(lower_bounds, [None, valid])
+            self.assertEqual(urgent_calls, [False, True])
         finally:
             reader.stop(timeout=2.0)
 
