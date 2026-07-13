@@ -706,6 +706,7 @@ class PerceptionHttpServer:
                         break
 
         self.httpd = ThreadingHTTPServer((self.host, self.port), Handler)
+        self.httpd.daemon_threads = True
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
         print(f"Perception MJPEG server listening on http://{self.host}:{self.port}")
@@ -2071,6 +2072,7 @@ if __name__ == "__main__":
     finally:
         if stream_server:
             stream_server.stop()
+        kinesis_utils.shutdown_media_clock_executors()
 
     # Or upload all at once after processing:
     # detector.upload_all()

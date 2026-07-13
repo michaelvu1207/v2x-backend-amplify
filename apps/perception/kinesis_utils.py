@@ -34,6 +34,14 @@ _NVDEC_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
 
+def shutdown_media_clock_executors():
+    """Quiesce URL-free fragment workers during cooperative process shutdown."""
+    _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR.shutdown(
+        wait=True, cancel_futures=True
+    )
+    _NVDEC_FRAGMENT_MATCH_EXECUTOR.shutdown(wait=True, cancel_futures=True)
+
+
 def _utc_iso(epoch):
     return datetime.fromtimestamp(epoch, timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.%f"
