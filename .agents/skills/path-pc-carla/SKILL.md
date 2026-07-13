@@ -9,7 +9,7 @@ Treat this file as an operating procedure, not proof of current state. Re-run th
 
 ## Newest perception release chronology
 
-Observed through 2026-07-13 00:26 UTC; verify rather than assume. These items
+Observed through 2026-07-13 01:17 UTC; verify rather than assume. These items
 override every older PR 32/candidate statement below.
 
 - PR 37 merged as canonical
@@ -42,6 +42,29 @@ override every older PR 32/candidate statement below.
   perception-only rollback at
   `/home/path/V2XCarla/v2x-evidence/perception/20260713T002445Z-pr37-live-monitor-24h/`.
   Do not call PR 37 accepted until that monitor reaches its terminal pass.
+  That first watch stopped at the natural 01:00 UTC hourly restart because its
+  harness treated systemd's normal `activating` state as inactive. Perception
+  remained healthy, the hourly restart completed Richmond/LIVE/zero-session
+  recovery, and no rollback occurred; this is rejected orchestration evidence.
+  After that harness check was corrected, a fresh watch at
+  `/home/path/V2XCarla/v2x-evidence/perception/20260713T010831Z-pr37-live-monitor-24h/`
+  found a real ch1 terminal `frame read failed` at sample 353. PR 37 did not
+  produce a trusted replacement inside its five-second bound, entered the
+  unchanged reconnect path, and the monitor automatically restored verified
+  PR 35 `76e561cd41d070a6402c39c98847e646bd81cc9a`. CARLA, Drive, web,
+  timers, and restart counters were preserved; the 01:14 UTC live state is
+  therefore PR 35, not PR 37. Do not restart the PR 37 acceptance clock.
+- Candidate `f76d493ebc2d38e8c4c0f70cac091f9c8024a377` increases only the
+  terminal replacement preparation bound from five to eight seconds, still
+  below the unchanged ten-second inference and 15-second freshness gates, and
+  exposes per-camera terminal-failover attempts, successes, failures, outcome,
+  and duration in `/health`. Missing or late trusted media clocks still fall
+  through to reconnect/staleness; no clock, freshness, decode-latency, or
+  zero-reconnect threshold is weakened. Verification passes 140 perception,
+  241 Python-3.10 bridge, and 23 recovery-infrastructure tests. Require an
+  upload-disabled isolated canary with forced terminal reader loss before any
+  controlled live deployment, followed by the full startup, ten-minute,
+  30-minute, natural-hourly, and fresh 24-hour gates.
 - PR 36 merged as canonical
   `edaae29e9c00b411137ba40b0fd546f4b7d3c33d`. It contains the
   fail-closed vehicle identity behavior described below. Controlled startup
