@@ -254,6 +254,7 @@ def resolve_hls_media_clock(
     timeout=10,
     http_get=requests.get,
     fragment_matcher=_match_fragment_frame,
+    not_before_media_time_utc=None,
 ):
     """Match one decoded frame to its exact HLS PDT/fragment position.
 
@@ -278,6 +279,20 @@ def resolve_hls_media_clock(
         playlist_url = hls_url
 
     fragments = _fragments_from_media_playlist(playlist_url, response.text)
+    if not_before_media_time_utc is not None:
+        not_before_epoch = _parse_program_date_time(
+            not_before_media_time_utc
+        )
+        fragments = [
+            fragment for fragment in fragments
+            if (
+                fragment.duration_seconds is None
+                or not math.isfinite(fragment.duration_seconds)
+                or fragment.program_date_time_epoch
+                + max(0.0, fragment.duration_seconds)
+                >= not_before_epoch
+            )
+        ]
     if not fragments:
         return None
 
@@ -376,6 +391,7 @@ def resolve_hls_media_clock_nvdec(
     capture_position_milliseconds,
     frame_identity,
     timeout=10,
+    not_before_media_time_utc=None,
 ):
     """Resolve an exact clock using the same pixels as the NVDEC live reader."""
     return resolve_hls_media_clock(
@@ -385,6 +401,7 @@ def resolve_hls_media_clock_nvdec(
         frame_identity,
         timeout=timeout,
         fragment_matcher=match_fragment_frame_nvdec,
+        not_before_media_time_utc=not_before_media_time_utc,
     )
 
 def _camera_id_from_stream_name(stream_name):

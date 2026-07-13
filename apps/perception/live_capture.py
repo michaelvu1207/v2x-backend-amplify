@@ -8,6 +8,7 @@ sequence number so consumers never mistake a cached frame for new input.
 
 from collections import deque
 import hashlib
+import inspect
 import math
 import threading
 import time
@@ -22,9 +23,10 @@ class _ProactiveRenewal(Exception):
 class _AsyncMediaClockResolution:
     """Resolve one exact media-clock anchor without pausing live capture."""
 
-    def __init__(self, factory, args):
+    def __init__(self, factory, args, kwargs=None):
         self._factory = factory
         self._args = args
+        self._kwargs = dict(kwargs or {})
         self._done = threading.Event()
         self._result = None
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -32,7 +34,21 @@ class _AsyncMediaClockResolution:
 
     def _run(self):
         try:
-            self._result = self._factory(*self._args)
+            kwargs = self._kwargs
+            if kwargs:
+                try:
+                    parameters = inspect.signature(self._factory).parameters
+                except (TypeError, ValueError):
+                    parameters = {}
+                accepts_keywords = any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+                kwargs = {
+                    key: value for key, value in kwargs.items()
+                    if accepts_keywords or key in parameters
+                }
+            self._result = self._factory(*self._args, **kwargs)
         except Exception:
             # Clock evidence is additive and fail-closed. The live reader must
             # keep decoding while a bounded metadata fetch/match fails.
@@ -42,6 +58,7 @@ class _AsyncMediaClockResolution:
             # resolver finishes; neither value is published or logged.
             self._factory = None
             self._args = None
+            self._kwargs = None
             self._done.set()
 
     def poll(self, timeout=0.0):
@@ -265,6 +282,7 @@ class _AsyncCaptureRestart:
         media_clock_factory,
         media_clock_validator,
         prior_media_clock,
+        prior_capture_position,
         capture_position_milliseconds,
         media_frame_identity,
         stop_event,
@@ -277,6 +295,18 @@ class _AsyncCaptureRestart:
         self._media_clock_factory = media_clock_factory
         self._media_clock_validator = media_clock_validator
         self._prior_media_clock = prior_media_clock
+        self._prior_media_time_utc = None
+        if (
+            prior_media_clock is not None
+            and prior_capture_position is not None
+        ):
+            prior_frame_clock = prior_media_clock.metadata_at(
+                prior_capture_position
+            )
+            if isinstance(prior_frame_clock, dict):
+                self._prior_media_time_utc = prior_frame_clock.get(
+                    "media_timestamp_utc"
+                )
         self._capture_position_milliseconds = capture_position_milliseconds
         self._media_frame_identity = media_frame_identity
         self._stop_event = stop_event
@@ -387,6 +417,11 @@ class _AsyncCaptureRestart:
                             position,
                             self._media_frame_identity,
                         ),
+                        {
+                            "not_before_media_time_utc": (
+                                self._prior_media_time_utc
+                            )
+                        },
                     )
                     self._set_stage("clock_resolution")
                 resolved, media_clock = clock_resolution.poll()
@@ -430,6 +465,7 @@ class _AsyncCaptureRestart:
             self._media_clock_factory = None
             self._media_clock_validator = None
             self._prior_media_clock = None
+            self._prior_media_time_utc = None
             self._capture_position_milliseconds = None
             self._media_frame_identity = None
             if capture is not None:
@@ -725,7 +761,7 @@ class LiveStreamReader:
         )
 
     def _prepare_same_session_restart(
-        self, source, clock_source, prior_media_clock
+        self, source, clock_source, prior_media_clock, prior_capture_position
     ):
         return _AsyncCaptureRestart(
             source,
@@ -734,6 +770,7 @@ class LiveStreamReader:
             self.media_clock_factory,
             self.media_clock_validator,
             prior_media_clock,
+            prior_capture_position,
             self.capture_position_milliseconds,
             self.media_frame_identity,
             self._stop_event,
@@ -742,7 +779,8 @@ class LiveStreamReader:
         )
 
     def _recover_terminal_read(
-        self, preparation, source, clock_source, prior_media_clock
+        self, preparation, source, clock_source, prior_media_clock,
+        prior_capture_position,
     ):
         """Return one fully validated replacement within a strict time bound.
 
@@ -774,7 +812,8 @@ class LiveStreamReader:
             if preparation is not None:
                 preparation.discard()
             candidate = self._prepare_same_session_restart(
-                source, clock_source, prior_media_clock
+                source, clock_source, prior_media_clock,
+                prior_capture_position,
             )
             method = "same_session_restart"
             may_start_fresh_attempt = True
@@ -903,6 +942,7 @@ class LiveStreamReader:
                                 capture_source,
                                 capture_clock_source,
                                 media_clock,
+                                last_capture_position,
                             )
                             proactive_preparation = None
                             if prepared is None:

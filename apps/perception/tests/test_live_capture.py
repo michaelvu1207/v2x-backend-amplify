@@ -279,8 +279,21 @@ class LiveStreamReaderTests(unittest.TestCase):
         captures = []
         valid = "2026-07-10T03:57:23.388Z"
         invalid = "2026-07-10T03:57:20.000Z"
-        clocks = [SequencedMediaClock([valid, invalid]), FakeMediaClock(valid)]
+        class PositionSensitiveClock:
+            def metadata_at(self, position_milliseconds):
+                return {
+                    "media_timestamp_utc": (
+                        valid if position_milliseconds == 0.0 else invalid
+                    ),
+                    "media_clock": {
+                        "source": "hls_ext_x_program_date_time",
+                        "position_milliseconds": position_milliseconds,
+                    },
+                }
+
+        clocks = [PositionSensitiveClock(), FakeMediaClock(valid)]
         clock_calls = []
+        lower_bounds = []
 
         def capture_factory(source):
             if not captures:
@@ -291,8 +304,11 @@ class LiveStreamReaderTests(unittest.TestCase):
             captures.append(capture)
             return capture
 
-        def media_clock_factory(*_args):
+        def media_clock_factory(
+            *_args, not_before_media_time_utc=None
+        ):
             clock_calls.append(_args)
+            lower_bounds.append(not_before_media_time_utc)
             return clocks[min(len(clock_calls) - 1, 1)]
 
         reader = LiveStreamReader(
@@ -318,6 +334,7 @@ class LiveStreamReaderTests(unittest.TestCase):
                 replacement["media_clock"]["media_timestamp_utc"], valid
             )
             self.assertEqual(len(clock_calls), 2)
+            self.assertEqual(lower_bounds, [None, valid])
         finally:
             reader.stop(timeout=2.0)
 

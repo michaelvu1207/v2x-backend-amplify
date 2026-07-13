@@ -173,6 +173,45 @@ getMP4MediaFragment.mp4?FragmentNumber=frag-123&SessionToken=media-secret
             fragment_matcher=lambda *_args: 0.0,
         ))
 
+    def test_trusted_lower_bound_prunes_only_obsolete_complete_fragments(self):
+        media = (
+            "#EXTM3U\n"
+            "#EXT-X-MAP:URI=init.mp4\n"
+            "#EXT-X-MEDIA-SEQUENCE:10\n"
+            "#EXT-X-PROGRAM-DATE-TIME:2026-07-10T03:57:20Z\n"
+            "#EXTINF:2.0,\nsegment-old.mp4\n"
+            "#EXT-X-PROGRAM-DATE-TIME:2026-07-10T03:57:22Z\n"
+            "#EXTINF:2.0,\nsegment-boundary.mp4\n"
+            "#EXT-X-PROGRAM-DATE-TIME:2026-07-10T03:57:24Z\n"
+            "#EXTINF:2.0,\nsegment-new.mp4\n"
+        )
+        requested = []
+
+        def get(url, timeout):
+            requested.append(url)
+            if len(requested) == 1:
+                return Response(text=media)
+            if url.endswith("init.mp4"):
+                return Response(content=b"init")
+            return Response(content=url.rsplit("/", 1)[-1].encode())
+
+        clock = resolve_hls_media_clock(
+            "https://example.invalid/media.m3u8",
+            reference_frame="target",
+            capture_position_milliseconds=0.0,
+            frame_identity=lambda frame: frame,
+            http_get=get,
+            fragment_matcher=lambda _init, segment, *_args: (
+                250.0 if segment == b"segment-new.mp4" else None
+            ),
+            not_before_media_time_utc="2026-07-10T03:57:23.500Z",
+        )
+
+        self.assertIsNotNone(clock)
+        self.assertFalse(any("segment-old.mp4" in url for url in requested))
+        self.assertTrue(any("segment-boundary.mp4" in url for url in requested))
+        self.assertTrue(any("segment-new.mp4" in url for url in requested))
+
     @patch("kinesis_utils.get_video_session_hls_url", return_value=None)
     @patch("kinesis_utils.boto3.client")
     def test_direct_kinesis_fallback_requests_pdt_fmp4_playlist(
