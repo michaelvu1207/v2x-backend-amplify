@@ -186,6 +186,7 @@ class LiveStreamReaderTests(unittest.TestCase):
             recovery=StreamRecovery(0.1, 0.1),
             state_callback=lambda **event: states.append(event),
             media_clock_factory=media_clock_factory,
+            media_clock_source_factory=lambda: "clock-session-1",
             media_clock_validator=lambda *_args: True,
             capture_position_milliseconds=lambda cap: cap.get(0),
             terminal_read_failover_seconds=0.5,
@@ -213,7 +214,7 @@ class LiveStreamReaderTests(unittest.TestCase):
             )
             self.assertGreaterEqual(len(clock_sources), 2)
             self.assertTrue(all(
-                source == "signed-session-1" for source in clock_sources
+                source == "clock-session-1" for source in clock_sources
             ))
             self.assertFalse(any(
                 event["state"] == "reconnecting" for event in states

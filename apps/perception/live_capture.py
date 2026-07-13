@@ -95,6 +95,7 @@ class _AsyncCapturePreparation:
                 if self._clock_source_factory is not None
                 else source
             )
+            prepared_clock_source = clock_source
             capture = self._capture_factory(source)
             if self._clock_source_factory is not None:
                 source = None
@@ -122,7 +123,13 @@ class _AsyncCapturePreparation:
                     with self._result_lock:
                         if self._discarded.is_set():
                             return
-                        self._result = (capture, *latest, None, capture_source)
+                        self._result = (
+                            capture,
+                            *latest,
+                            None,
+                            capture_source,
+                            prepared_clock_source,
+                        )
                         capture = None
                     return
                 if position is None:
@@ -179,6 +186,7 @@ class _AsyncCapturePreparation:
                         position,
                         media_clock,
                         capture_source,
+                        prepared_clock_source,
                     )
                     capture = None
                 return
@@ -223,15 +231,17 @@ class _AsyncCaptureRestart:
     """Restart FFmpeg against the active in-memory signed HLS session.
 
     A local FIFO/decoder can terminate while the server-side KVS HLS session
-    remains valid. Reopening that same connection-local URL avoids minting an
-    additional KVS session at the account client limit. The first replacement
-    frame must still map through the already trusted exact media clock and pass
-    the unchanged receipt-time validator before handoff.
+    remains valid. Reopening the same connection-local capture URL and
+    re-anchoring through its paired connection-local clock URL avoids minting
+    any additional KVS session at the account client limit. The first
+    replacement frame must still obtain an exact clock and pass the unchanged
+    receipt-time validator before handoff.
     """
 
     def __init__(
         self,
         source,
+        clock_source,
         capture_factory,
         media_clock_factory,
         media_clock_validator,
@@ -242,6 +252,7 @@ class _AsyncCaptureRestart:
         monotonic,
     ):
         self._source = source
+        self._clock_source = clock_source
         self._capture_factory = capture_factory
         self._media_clock_factory = media_clock_factory
         self._media_clock_validator = media_clock_validator
@@ -262,6 +273,7 @@ class _AsyncCaptureRestart:
         capture = None
         clock_resolution = None
         source = self._source
+        clock_source = self._clock_source
         try:
             capture = self._capture_factory(source)
             if capture is None or not capture.isOpened():
@@ -294,6 +306,7 @@ class _AsyncCaptureRestart:
                             position,
                             None,
                             source,
+                            clock_source,
                         )
                         capture = None
                     return
@@ -301,7 +314,7 @@ class _AsyncCaptureRestart:
                     clock_resolution = _AsyncMediaClockResolution(
                         self._media_clock_factory,
                         (
-                            source,
+                            clock_source,
                             frame,
                             position,
                             self._media_frame_identity,
@@ -331,6 +344,7 @@ class _AsyncCaptureRestart:
                         position,
                         media_clock,
                         source,
+                        clock_source,
                     )
                     capture = None
                 return
@@ -339,6 +353,7 @@ class _AsyncCaptureRestart:
             self._failed = True
         finally:
             self._source = None
+            self._clock_source = None
             self._capture_factory = None
             self._media_clock_factory = None
             self._media_clock_validator = None
@@ -633,9 +648,10 @@ class LiveStreamReader:
             self.monotonic,
         )
 
-    def _prepare_same_session_restart(self, source):
+    def _prepare_same_session_restart(self, source, clock_source):
         return _AsyncCaptureRestart(
             source,
+            clock_source,
             self.capture_factory,
             self.media_clock_factory,
             self.media_clock_validator,
@@ -646,7 +662,7 @@ class LiveStreamReader:
             self.monotonic,
         )
 
-    def _recover_terminal_read(self, preparation, source):
+    def _recover_terminal_read(self, preparation, source, clock_source):
         """Return one fully validated replacement within a strict time bound.
 
         A live FFmpeg FIFO can close on a single HLS discontinuity while the
@@ -672,10 +688,12 @@ class LiveStreamReader:
             )
             return result
 
-        if source is not None:
+        if source is not None and clock_source is not None:
             if preparation is not None:
                 preparation.discard()
-            candidate = self._prepare_same_session_restart(source)
+            candidate = self._prepare_same_session_restart(
+                source, clock_source
+            )
             method = "same_session_restart"
             may_start_fresh_attempt = True
         else:
@@ -725,6 +743,7 @@ class LiveStreamReader:
 
             cap = None
             capture_source = None
+            capture_clock_source = None
             proactive_preparation = None
             try:
                 # Keep signed URLs only in the connection-local stack. The
@@ -738,6 +757,7 @@ class LiveStreamReader:
                     if self.media_clock_source_factory is not None
                     else source
                 )
+                capture_clock_source = clock_source
                 media_clock = None
                 clock_resolution = None
                 next_media_clock_retry = 0.0
@@ -795,6 +815,7 @@ class LiveStreamReader:
                             prepared = self._recover_terminal_read(
                                 proactive_preparation,
                                 capture_source,
+                                capture_clock_source,
                             )
                             proactive_preparation = None
                             if prepared is None:
@@ -813,11 +834,13 @@ class LiveStreamReader:
                             prepared_position,
                             prepared_media_clock,
                             prepared_source,
+                            prepared_clock_source,
                         ) = prepared
                         previous, cap = cap, replacement
                         previous.release()
                         media_clock = prepared_media_clock
                         capture_source = prepared_source
+                        capture_clock_source = prepared_clock_source
                         has_trusted_media_clock = (
                             prepared_media_clock is not None
                             or self.media_clock_factory is None
