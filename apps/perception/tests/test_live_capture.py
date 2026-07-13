@@ -191,7 +191,7 @@ class LiveStreamReaderTests(unittest.TestCase):
             self.assertIsNotNone(first)
             replacement = reader.wait_for_frame(first["sequence"], timeout=2.0)
             self.assertIsNotNone(replacement)
-            self.assertIn("signed-session-2", replacement["frame"])
+            self.assertIn("signed-session-1", replacement["frame"])
             self.assertIsNotNone(replacement["media_clock"])
             self.assertTrue(captures[0].released)
             self.assertTrue(any(
@@ -203,6 +203,9 @@ class LiveStreamReaderTests(unittest.TestCase):
             ]
             self.assertEqual(len(terminal), 1)
             self.assertGreaterEqual(terminal[0]["delay_seconds"], 0.0)
+            self.assertEqual(
+                terminal[0]["method"], "same_session_restart"
+            )
             self.assertFalse(any(
                 event["state"] == "reconnecting" for event in states
             ))

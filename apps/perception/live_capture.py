@@ -89,6 +89,7 @@ class _AsyncCapturePreparation:
         clock_resolution = None
         try:
             source = self._source_factory()
+            capture_source = source
             clock_source = (
                 self._clock_source_factory()
                 if self._clock_source_factory is not None
@@ -121,7 +122,7 @@ class _AsyncCapturePreparation:
                     with self._result_lock:
                         if self._discarded.is_set():
                             return
-                        self._result = (capture, *latest, None)
+                        self._result = (capture, *latest, None, capture_source)
                         capture = None
                     return
                 if position is None:
@@ -177,6 +178,7 @@ class _AsyncCapturePreparation:
                         source_monotonic,
                         position,
                         media_clock,
+                        capture_source,
                     )
                     capture = None
                 return
@@ -191,6 +193,123 @@ class _AsyncCapturePreparation:
             self._media_clock_validator = None
             self._capture_position_milliseconds = None
             self._media_frame_identity = None
+            if capture is not None:
+                capture.release()
+            self._done.set()
+
+    def poll(self):
+        if not self._done.is_set():
+            return False, None, False
+        with self._result_lock:
+            return True, self._result, self._failed
+
+    def take(self):
+        with self._result_lock:
+            result, self._result = self._result, None
+            return result
+
+    def discard(self):
+        self._discarded.set()
+        capture = None
+        with self._result_lock:
+            if self._result is not None:
+                capture = self._result[0]
+                self._result = None
+        if capture is not None:
+            capture.release()
+
+
+class _AsyncCaptureRestart:
+    """Restart FFmpeg against the active in-memory signed HLS session.
+
+    A local FIFO/decoder can terminate while the server-side KVS HLS session
+    remains valid. Reopening that same connection-local URL avoids minting an
+    additional KVS session at the account client limit. The first replacement
+    frame must still map through the already trusted exact media clock and pass
+    the unchanged receipt-time validator before handoff.
+    """
+
+    def __init__(
+        self,
+        source,
+        capture_factory,
+        media_clock,
+        media_clock_validator,
+        capture_position_milliseconds,
+        stop_event,
+        wall_time,
+        monotonic,
+    ):
+        self._source = source
+        self._capture_factory = capture_factory
+        self._media_clock = media_clock
+        self._media_clock_validator = media_clock_validator
+        self._capture_position_milliseconds = capture_position_milliseconds
+        self._stop_event = stop_event
+        self._wall_time = wall_time
+        self._monotonic = monotonic
+        self._done = threading.Event()
+        self._discarded = threading.Event()
+        self._result_lock = threading.Lock()
+        self._result = None
+        self._failed = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        capture = None
+        source = self._source
+        try:
+            capture = self._capture_factory(source)
+            if capture is None or not capture.isOpened():
+                raise RuntimeError("capture open failed")
+            while not (
+                self._stop_event.is_set() or self._discarded.is_set()
+            ):
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    raise RuntimeError("frame read failed")
+                source_epoch = self._wall_time()
+                source_monotonic = self._monotonic()
+                position = None
+                if self._capture_position_milliseconds is not None:
+                    try:
+                        position = self._capture_position_milliseconds(capture)
+                    except (AttributeError, TypeError, ValueError):
+                        position = None
+                if position is None:
+                    continue
+                frame_clock = self._media_clock.metadata_at(position)
+                if frame_clock is None:
+                    continue
+                if (
+                    self._media_clock_validator is not None
+                    and not self._media_clock_validator(frame_clock, source_epoch)
+                ):
+                    continue
+                with self._result_lock:
+                    if self._discarded.is_set():
+                        return
+                    self._result = (
+                        capture,
+                        frame,
+                        source_epoch,
+                        source_monotonic,
+                        position,
+                        self._media_clock,
+                        source,
+                    )
+                    capture = None
+                return
+            raise RuntimeError("capture restart stopped")
+        except Exception:
+            self._failed = True
+        finally:
+            self._source = None
+            self._capture_factory = None
+            self._media_clock = None
+            self._media_clock_validator = None
+            self._capture_position_milliseconds = None
             if capture is not None:
                 capture.release()
             self._done.set()
@@ -449,13 +568,14 @@ class LiveStreamReader:
             )
         return self.snapshot(after_sequence)
 
-    def _notify(self, state, error=None, delay_seconds=0.0):
+    def _notify(self, state, error=None, delay_seconds=0.0, method=None):
         if self.state_callback:
             self.state_callback(
                 state=state,
                 error=error,
                 failures=self.recovery.failures,
                 delay_seconds=float(delay_seconds),
+                method=method,
             )
 
     def _remember_frame_identity(self, identity):
@@ -479,7 +599,19 @@ class LiveStreamReader:
             self.monotonic,
         )
 
-    def _recover_terminal_read(self, preparation):
+    def _prepare_same_session_restart(self, source, media_clock):
+        return _AsyncCaptureRestart(
+            source,
+            self.capture_factory,
+            media_clock,
+            self.media_clock_validator,
+            self.capture_position_milliseconds,
+            self._stop_event,
+            self.wall_time,
+            self.monotonic,
+        )
+
+    def _recover_terminal_read(self, preparation, source, media_clock):
         """Return one fully validated replacement within a strict time bound.
 
         A live FFmpeg FIFO can close on a single HLS discontinuity while the
@@ -496,43 +628,57 @@ class LiveStreamReader:
         started = self.monotonic()
         deadline = started + self.terminal_read_failover_seconds
 
-        def finish(result, outcome):
+        def finish(result, outcome, method):
             elapsed = max(0.0, self.monotonic() - started)
             self._notify(
                 f"terminal_failover_{outcome}",
                 delay_seconds=elapsed,
+                method=method,
             )
             return result
 
-        candidate = preparation or self._prepare_replacement_capture()
+        if source is not None and media_clock is not None:
+            if preparation is not None:
+                preparation.discard()
+            candidate = self._prepare_same_session_restart(source, media_clock)
+            method = "same_session_restart"
+            may_start_fresh_attempt = True
+        else:
+            candidate = preparation or self._prepare_replacement_capture()
+            method = (
+                "proactive_replacement"
+                if preparation is not None
+                else "fresh_session_replacement"
+            )
+            may_start_fresh_attempt = preparation is not None
         # If an already-running proactive preparation fails at the same moment
         # as the active reader, permit one clean connection-local attempt. If
         # the terminal read itself started the preparation, never spin on fast
         # source failures and overload the session-mint API.
-        may_start_fresh_attempt = preparation is not None
         while not self._stop_event.is_set():
             done, result, failed = candidate.poll()
             if done:
                 if not failed and result is not None:
-                    return finish(candidate.take(), "succeeded")
+                    return finish(candidate.take(), "succeeded", method)
                 candidate.discard()
                 if (
                     not may_start_fresh_attempt
                     or self.monotonic() >= deadline
                 ):
-                    return finish(None, "failed")
+                    return finish(None, "failed", method)
                 may_start_fresh_attempt = False
                 candidate = self._prepare_replacement_capture()
+                method = "fresh_session_replacement"
                 continue
 
             remaining = deadline - self.monotonic()
             if remaining <= 0.0:
                 candidate.discard()
-                return finish(None, "failed")
+                return finish(None, "failed", method)
             self._stop_event.wait(min(0.01, remaining))
 
         candidate.discard()
-        return finish(None, "stopped")
+        return finish(None, "stopped", method)
 
     def _run(self):
         while not self._stop_event.is_set():
@@ -543,6 +689,7 @@ class LiveStreamReader:
                 continue
 
             cap = None
+            capture_source = None
             proactive_preparation = None
             try:
                 # Keep signed URLs only in the connection-local stack. The
@@ -550,6 +697,7 @@ class LiveStreamReader:
                 # safe live-edge capture window. Never publish, log, or retain
                 # either URL in reader state; renew both on every outer attempt.
                 source = self.source_factory()
+                capture_source = source
                 clock_source = (
                     self.media_clock_source_factory()
                     if self.media_clock_source_factory is not None
@@ -610,7 +758,9 @@ class LiveStreamReader:
                         ret, frame = cap.read()
                         if not ret or frame is None:
                             prepared = self._recover_terminal_read(
-                                proactive_preparation
+                                proactive_preparation,
+                                capture_source,
+                                media_clock,
                             )
                             proactive_preparation = None
                             if prepared is None:
@@ -628,10 +778,12 @@ class LiveStreamReader:
                             source_monotonic,
                             prepared_position,
                             prepared_media_clock,
+                            prepared_source,
                         ) = prepared
                         previous, cap = cap, replacement
                         previous.release()
                         media_clock = prepared_media_clock
+                        capture_source = prepared_source
                         has_trusted_media_clock = (
                             prepared_media_clock is not None
                             or self.media_clock_factory is None
