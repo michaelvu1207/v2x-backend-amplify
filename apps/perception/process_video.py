@@ -1083,7 +1083,7 @@ class MultiCameraPipeline:
             "V2X_PERCEPTION_CAPTURE_HLS_FRAGMENTS", 1
         ))
         clock_hls_fragments = int(env_float(
-            "V2X_PERCEPTION_CLOCK_HLS_FRAGMENTS", 5
+            "V2X_PERCEPTION_CLOCK_HLS_FRAGMENTS", 4
         ))
         if not 1 <= capture_hls_fragments <= 2:
             raise ValueError(

@@ -28,10 +28,10 @@ load_dotenv()
 # fragment; the smaller pool changes scheduling only, not clock evidence.
 _NVDEC_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 # Terminal recovery must not wait behind proactive four-camera clock work. A
-# terminal reader has already lost its live decoder, so one reserved exact-match
-# worker replaces that freed slot without increasing the steady-state decoder
-# budget. It uses the same matcher and ambiguity gate as the normal pool.
-_NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+# terminal reader has already lost its live decoder, so two reserved exact-match
+# workers run only off the steady-state path while proactive preparations remain
+# serialized. They use the same matcher and ambiguity gate as the normal pool.
+_NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
 
 def _utc_iso(epoch):
