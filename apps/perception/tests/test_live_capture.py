@@ -161,6 +161,7 @@ class LiveStreamReaderTests(unittest.TestCase):
 
     def test_terminal_read_hot_failover_keeps_streaming_state_and_clock(self):
         captures = []
+        clock_sources = []
         states = []
 
         def source_factory():
@@ -175,12 +176,16 @@ class LiveStreamReaderTests(unittest.TestCase):
             captures.append(capture)
             return capture
 
+        def media_clock_factory(source, *_args):
+            clock_sources.append(source)
+            return FakeMediaClock()
+
         reader = LiveStreamReader(
             source_factory=source_factory,
             capture_factory=capture_factory,
             recovery=StreamRecovery(0.1, 0.1),
             state_callback=lambda **event: states.append(event),
-            media_clock_factory=lambda *_args: FakeMediaClock(),
+            media_clock_factory=media_clock_factory,
             media_clock_validator=lambda *_args: True,
             capture_position_milliseconds=lambda cap: cap.get(0),
             terminal_read_failover_seconds=0.5,
@@ -206,6 +211,10 @@ class LiveStreamReaderTests(unittest.TestCase):
             self.assertEqual(
                 terminal[0]["method"], "same_session_restart"
             )
+            self.assertGreaterEqual(len(clock_sources), 2)
+            self.assertTrue(all(
+                source == "signed-session-1" for source in clock_sources
+            ))
             self.assertFalse(any(
                 event["state"] == "reconnecting" for event in states
             ))

@@ -233,18 +233,20 @@ class _AsyncCaptureRestart:
         self,
         source,
         capture_factory,
-        media_clock,
+        media_clock_factory,
         media_clock_validator,
         capture_position_milliseconds,
+        media_frame_identity,
         stop_event,
         wall_time,
         monotonic,
     ):
         self._source = source
         self._capture_factory = capture_factory
-        self._media_clock = media_clock
+        self._media_clock_factory = media_clock_factory
         self._media_clock_validator = media_clock_validator
         self._capture_position_milliseconds = capture_position_milliseconds
+        self._media_frame_identity = media_frame_identity
         self._stop_event = stop_event
         self._wall_time = wall_time
         self._monotonic = monotonic
@@ -258,6 +260,7 @@ class _AsyncCaptureRestart:
 
     def _run(self):
         capture = None
+        clock_resolution = None
         source = self._source
         try:
             capture = self._capture_factory(source)
@@ -279,9 +282,39 @@ class _AsyncCaptureRestart:
                         position = None
                 if position is None:
                     continue
-                frame_clock = self._media_clock.metadata_at(position)
-                if frame_clock is None:
+                if self._media_clock_factory is None:
+                    with self._result_lock:
+                        if self._discarded.is_set():
+                            return
+                        self._result = (
+                            capture,
+                            frame,
+                            source_epoch,
+                            source_monotonic,
+                            position,
+                            None,
+                            source,
+                        )
+                        capture = None
+                    return
+                if clock_resolution is None:
+                    clock_resolution = _AsyncMediaClockResolution(
+                        self._media_clock_factory,
+                        (
+                            source,
+                            frame,
+                            position,
+                            self._media_frame_identity,
+                        ),
+                    )
+                resolved, media_clock = clock_resolution.poll()
+                if not resolved:
                     continue
+                if media_clock is None:
+                    raise RuntimeError("media clock resolution failed")
+                frame_clock = media_clock.metadata_at(position)
+                if frame_clock is None:
+                    raise RuntimeError("media clock metadata failed")
                 if (
                     self._media_clock_validator is not None
                     and not self._media_clock_validator(frame_clock, source_epoch)
@@ -296,7 +329,7 @@ class _AsyncCaptureRestart:
                         source_epoch,
                         source_monotonic,
                         position,
-                        self._media_clock,
+                        media_clock,
                         source,
                     )
                     capture = None
@@ -307,9 +340,10 @@ class _AsyncCaptureRestart:
         finally:
             self._source = None
             self._capture_factory = None
-            self._media_clock = None
+            self._media_clock_factory = None
             self._media_clock_validator = None
             self._capture_position_milliseconds = None
+            self._media_frame_identity = None
             if capture is not None:
                 capture.release()
             self._done.set()
@@ -599,19 +633,20 @@ class LiveStreamReader:
             self.monotonic,
         )
 
-    def _prepare_same_session_restart(self, source, media_clock):
+    def _prepare_same_session_restart(self, source):
         return _AsyncCaptureRestart(
             source,
             self.capture_factory,
-            media_clock,
+            self.media_clock_factory,
             self.media_clock_validator,
             self.capture_position_milliseconds,
+            self.media_frame_identity,
             self._stop_event,
             self.wall_time,
             self.monotonic,
         )
 
-    def _recover_terminal_read(self, preparation, source, media_clock):
+    def _recover_terminal_read(self, preparation, source):
         """Return one fully validated replacement within a strict time bound.
 
         A live FFmpeg FIFO can close on a single HLS discontinuity while the
@@ -637,10 +672,10 @@ class LiveStreamReader:
             )
             return result
 
-        if source is not None and media_clock is not None:
+        if source is not None:
             if preparation is not None:
                 preparation.discard()
-            candidate = self._prepare_same_session_restart(source, media_clock)
+            candidate = self._prepare_same_session_restart(source)
             method = "same_session_restart"
             may_start_fresh_attempt = True
         else:
@@ -760,7 +795,6 @@ class LiveStreamReader:
                             prepared = self._recover_terminal_read(
                                 proactive_preparation,
                                 capture_source,
-                                media_clock,
                             )
                             proactive_preparation = None
                             if prepared is None:
