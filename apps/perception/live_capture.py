@@ -84,12 +84,14 @@ class _AsyncTerminalCleanup:
             self._succeeded = False
         finally:
             self._action = None
-            self._done.set()
             with _TERMINAL_CLEANUPS_LOCK:
                 if not self._succeeded:
                     _TERMINAL_CLEANUP_FAILURES += 1
                 if _TERMINAL_CLEANUPS.get(self.key) is self:
                     _TERMINAL_CLEANUPS.pop(self.key, None)
+            # A waiter observing completion must also observe sticky failure
+            # accounting and global-registry removal from the same action.
+            self._done.set()
 
     def wait(self, timeout=None):
         return self._done.wait(
@@ -108,6 +110,26 @@ def _start_terminal_cleanup(key, action):
             _TERMINAL_CLEANUPS[key] = cleanup
             cleanup.start()
         return cleanup
+
+
+def _start_reader_owned_cleanup(key, action):
+    """Start one cleanup owned and awaited by a specific live reader."""
+    cleanup = _AsyncTerminalCleanup(key, action)
+    cleanup.start()
+    return cleanup
+
+
+def _promote_reader_owned_cleanup(cleanup):
+    """Expose an in-flight reader cleanup to the process-wide stop gate."""
+    def wait_for_owned_cleanup():
+        cleanup.wait()
+        # The reader-owned task already records its own failure in the sticky
+        # process counter. The wrapper provides visibility only; re-raising here
+        # would count one failed release twice.
+
+    return _start_terminal_cleanup(
+        ("reader-owned", id(cleanup)), wait_for_owned_cleanup
+    )
 
 
 def _cleanup_candidate(candidate):
@@ -1586,6 +1608,14 @@ class LiveStreamReader:
         return False
 
     def _cleanup_claimed_until(self, candidate, prepared, deadline):
+        cleanup = self._start_claimed_cleanup(candidate, prepared)
+        cleanup.wait(max(0.0, deadline - self.monotonic()))
+        if cleanup.succeeded():
+            return True
+        self._track_terminal_cleanup(cleanup)
+        return False
+
+    def _start_claimed_cleanup(self, candidate, prepared):
         preparation_candidate = isinstance(
             candidate, _AsyncCapturePreparation
         )
@@ -1605,11 +1635,7 @@ class LiveStreamReader:
         cleanup = _start_terminal_cleanup(
             ("claimed", id(candidate)), release_claimed
         )
-        cleanup.wait(max(0.0, deadline - self.monotonic()))
-        if cleanup.succeeded():
-            return True
-        self._track_terminal_cleanup(cleanup)
-        return False
+        return cleanup
 
     def _recover_terminal_read_admitted(
         self,
@@ -1937,21 +1963,63 @@ class LiveStreamReader:
                             prepared_source,
                             prepared_clock_source,
                         ) = prepared
-                        previous, cap = cap, replacement
-                        try:
-                            if previous is not None:
-                                previous.release()
-                        except Exception:
+                        previous, cap = cap, None
+                        previous_release_errors = []
+
+                        def release_previous():
+                            try:
+                                if previous is not None:
+                                    previous.release()
+                            except Exception as exc:
+                                previous_release_errors.append(exc)
+                                raise
+
+                        # Normal handover still waits for the old writer before
+                        # adopt() releases the replacement's auxiliary lease.
+                        # Running that release in a reader-owned daemon task lets
+                        # process shutdown interrupt the wait and destroy both
+                        # old and claimed replacement captures concurrently.
+                        previous_cleanup = _start_reader_owned_cleanup(
+                            ("handover", id(previous)), release_previous
+                        )
+                        while not previous_cleanup.wait(0.01):
+                            if self._stop_event.is_set():
+                                break
+                        if self._stop_event.is_set():
+                            previous_cleanup = (
+                                _promote_reader_owned_cleanup(
+                                    previous_cleanup
+                                )
+                            )
+                            self._track_terminal_cleanup(previous_cleanup)
+                            if prepared_owner is not None:
+                                replacement_cleanup = (
+                                    self._start_claimed_cleanup(
+                                        prepared_owner, prepared
+                                    )
+                                )
+                            else:
+                                replacement_cleanup = _start_terminal_cleanup(
+                                    ("capture", id(replacement)),
+                                    replacement.release,
+                                )
+                            self._track_terminal_cleanup(replacement_cleanup)
+                            prepared_owner = None
+                            break
+                        if not previous_cleanup.succeeded():
                             # The new decoder cannot outlive its admission lease
                             # when the old active reader failed to close.
-                            cap = None
-                            replacement.release()
-                            if prepared_owner is not None:
-                                prepared_owner.adopt()
-                            raise
-                        else:
-                            if prepared_owner is not None:
-                                prepared_owner.adopt()
+                            try:
+                                replacement.release()
+                            finally:
+                                if prepared_owner is not None:
+                                    prepared_owner.adopt()
+                            if previous_release_errors:
+                                raise previous_release_errors[0]
+                            raise RuntimeError("old capture release failed")
+                        cap = replacement
+                        if prepared_owner is not None:
+                            prepared_owner.adopt()
                         if clock_resolution is not None:
                             # A proactive handover can beat an active exact
                             # matcher. Quarantine that superseded resolver so

@@ -39,10 +39,13 @@ _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR = DaemonWorkerPool(
     max_workers=2,
     thread_name_prefix="v2x-urgent-fragment-match",
 )
+MEDIA_CLOCK_EXECUTOR_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
-def shutdown_media_clock_executors(timeout=5.0):
+def shutdown_media_clock_executors(timeout=None):
     """Boundedly quiesce URL-free fragment workers during process shutdown."""
+    if timeout is None:
+        timeout = MEDIA_CLOCK_EXECUTOR_SHUTDOWN_TIMEOUT_SECONDS
     deadline = time.monotonic() + max(0.0, float(timeout))
     executors = (
         _NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR,

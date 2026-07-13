@@ -14,7 +14,10 @@ import time
 import requests
 import tracking_utils
 import kinesis_utils
-from ffmpeg_capture import FfmpegNvdecCapture
+from ffmpeg_capture import (
+    FfmpegNvdecCapture,
+    NVDEC_CAPTURE_RELEASE_WAIT_RESERVE_SECONDS,
+)
 from bounded_executor import DaemonWorkerPool
 from decoder_admission import AUXILIARY_DECODER_ADMISSION
 from live_capture import (
@@ -41,6 +44,50 @@ from tracking_utils import AppearanceExtractor, KalmanTracker
 
 TIMESTAMP_SCHEMA_VERSION = 2
 _INFERENCE_SHUTDOWN_POLL_SECONDS = 0.05
+_COOPERATIVE_SHUTDOWN_MARGIN_SECONDS = 2.0
+_COOPERATIVE_SHUTDOWN_CEILING_SECONDS = 45.0
+_PERCEPTION_HTTP_SHUTDOWN_BOUND_SECONDS = 1.0
+_OUTER_SHUTDOWN_MARGIN_SECONDS = 1.0
+_OUTER_SHUTDOWN_RESERVE_SECONDS = (
+    kinesis_utils.MEDIA_CLOCK_EXECUTOR_SHUTDOWN_TIMEOUT_SECONDS
+    + _PERCEPTION_HTTP_SHUTDOWN_BOUND_SECONDS
+    + _OUTER_SHUTDOWN_MARGIN_SECONDS
+)
+
+
+def _live_pipeline_shutdown_timeout_seconds(
+    capture_backend, open_timeout_ms, read_timeout_ms
+):
+    """Return a pipeline budget that preserves the outer service-stop reserve."""
+    open_seconds = float(open_timeout_ms) / 1000.0
+    read_seconds = float(read_timeout_ms) / 1000.0
+    if not all(
+        math.isfinite(value) and value > 0.0
+        for value in (open_seconds, read_seconds)
+    ):
+        raise ValueError("capture open/read timeouts must be finite and positive")
+
+    # Preserve the prior OpenCV budget. An unclaimed NVDEC helper can still be
+    # inside native open before its finite-wait cleanup begins. A claimed helper's
+    # old and replacement captures are released concurrently once shutdown is
+    # observed, so only one release envelope is charged from that instant.
+    timeout_seconds = max(1.0, open_seconds + read_seconds + 1.0)
+    if capture_backend == "ffmpeg_nvdec":
+        timeout_seconds = max(
+            timeout_seconds,
+            max(open_seconds, read_seconds)
+            + NVDEC_CAPTURE_RELEASE_WAIT_RESERVE_SECONDS
+            + _COOPERATIVE_SHUTDOWN_MARGIN_SECONDS,
+        )
+    if (
+        timeout_seconds + _OUTER_SHUTDOWN_RESERVE_SECONDS
+        >= _COOPERATIVE_SHUTDOWN_CEILING_SECONDS
+    ):
+        raise ValueError(
+            "capture timeouts plus outer cleanup exceed the "
+            "sub-45-second cooperative shutdown boundary"
+        )
+    return timeout_seconds
 
 
 def assess_media_clock(
@@ -863,7 +910,11 @@ class PerceptionHttpServer:
 
         self.httpd = ThreadingHTTPServer((self.host, self.port), Handler)
         self.httpd.daemon_threads = True
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread = threading.Thread(
+            target=self.httpd.serve_forever,
+            kwargs={"poll_interval": 0.1},
+            daemon=True,
+        )
         self.thread.start()
         print(f"Perception MJPEG server listening on http://{self.host}:{self.port}")
 
@@ -1279,6 +1330,9 @@ class MultiCameraPipeline:
             raise ValueError(
                 "V2X_PERCEPTION_CAPTURE_BACKEND must be opencv or ffmpeg_nvdec"
             )
+        shutdown_timeout_seconds = _live_pipeline_shutdown_timeout_seconds(
+            capture_backend, open_timeout_ms, read_timeout_ms
+        )
         ffmpeg_binary = os.getenv(
             "V2X_PERCEPTION_FFMPEG_BIN", "/usr/bin/ffmpeg"
         )
@@ -1731,9 +1785,7 @@ class MultiCameraPipeline:
             # tracked helper cleanup.  It remains well inside systemd's
             # TimeoutStopSec so the service can fail visibly instead of being
             # killed after an unbounded Python join.
-            stop_deadline = time.monotonic() + max(
-                1.0, (open_timeout_ms + read_timeout_ms) / 1000.0 + 1.0
-            )
+            stop_deadline = time.monotonic() + shutdown_timeout_seconds
             for reader in live_readers:
                 reader.request_stop(deadline=stop_deadline)
             # Preparation captures use their own discard event so a blocked

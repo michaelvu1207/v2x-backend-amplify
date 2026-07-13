@@ -15,12 +15,19 @@ sys.path.insert(0, str(PERCEPTION_DIR))
 
 from live_capture import bounded_frame_identity  # noqa: E402
 from process_video import (  # noqa: E402
+    _COOPERATIVE_SHUTDOWN_CEILING_SECONDS,
+    _COOPERATIVE_SHUTDOWN_MARGIN_SECONDS,
+    _OUTER_SHUTDOWN_RESERVE_SECONDS,
+    _live_pipeline_shutdown_timeout_seconds,
     FrameBroadcaster,
     MultiCameraPipeline,
     VideoObjectDetector,
     attach_media_clock_metadata,
     assess_media_clock,
     records_ready_for_upload,
+)
+from ffmpeg_capture import (  # noqa: E402
+    NVDEC_CAPTURE_RELEASE_WAIT_RESERVE_SECONDS,
 )
 
 
@@ -812,6 +819,67 @@ class LivePipelineTimestampTests(unittest.TestCase):
                 "source_epoch": 1_000.0 + index,
                 "source_monotonic": 500.0 + index,
             }
+
+    def test_nvdec_shutdown_budget_covers_unclaimed_open_then_cleanup(self):
+        timeout = _live_pipeline_shutdown_timeout_seconds(
+            "ffmpeg_nvdec", 10_000, 10_000
+        )
+        self.assertGreaterEqual(
+            timeout,
+            10.0
+            + NVDEC_CAPTURE_RELEASE_WAIT_RESERVE_SECONDS
+            + _COOPERATIVE_SHUTDOWN_MARGIN_SECONDS,
+        )
+        self.assertLess(timeout, _COOPERATIVE_SHUTDOWN_CEILING_SECONDS)
+
+    def test_nvdec_shutdown_budget_covers_concurrent_claimed_cleanup(self):
+        timeout = _live_pipeline_shutdown_timeout_seconds(
+            "ffmpeg_nvdec", 10_000, 10_000
+        )
+        self.assertGreaterEqual(
+            timeout,
+            NVDEC_CAPTURE_RELEASE_WAIT_RESERVE_SECONDS
+            + _COOPERATIVE_SHUTDOWN_MARGIN_SECONDS,
+        )
+        self.assertLess(
+            timeout,
+            2.0 * NVDEC_CAPTURE_RELEASE_WAIT_RESERVE_SECONDS
+            + _COOPERATIVE_SHUTDOWN_MARGIN_SECONDS,
+        )
+        self.assertLess(timeout, _COOPERATIVE_SHUTDOWN_CEILING_SECONDS)
+
+    def test_shutdown_budget_reserves_outer_service_cleanup(self):
+        timeout = _live_pipeline_shutdown_timeout_seconds(
+            "ffmpeg_nvdec", 10_000, 10_000
+        )
+        self.assertLess(
+            timeout + _OUTER_SHUTDOWN_RESERVE_SECONDS,
+            _COOPERATIVE_SHUTDOWN_CEILING_SECONDS,
+        )
+
+    def test_nvdec_shutdown_budget_rejects_configuration_at_ceiling(self):
+        with self.assertRaisesRegex(ValueError, "sub-45-second"):
+            _live_pipeline_shutdown_timeout_seconds(
+                "ffmpeg_nvdec", 30_000, 30_000
+            )
+
+    def test_shutdown_budget_rejects_disabled_native_timeout(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            _live_pipeline_shutdown_timeout_seconds(
+                "ffmpeg_nvdec", 0, 10_000
+            )
+
+    def test_service_stop_timeout_exceeds_cooperative_ceiling(self):
+        unit = (
+            PERCEPTION_DIR.parents[1]
+            / "scripts/systemd/v2x-perception.service"
+        ).read_text(encoding="utf-8")
+        value = next(
+            float(line.split("=", 1)[1])
+            for line in unit.splitlines()
+            if line.startswith("TimeoutStopSec=")
+        )
+        self.assertGreater(value, _COOPERATIVE_SHUTDOWN_CEILING_SECONDS)
 
     @patch("process_video.LiveStreamReader", FakeReader)
     def test_pre_requested_shutdown_cleans_up_without_consuming_frames(self):

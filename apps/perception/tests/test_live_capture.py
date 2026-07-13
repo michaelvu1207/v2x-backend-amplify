@@ -1109,16 +1109,22 @@ from live_capture import (
     LiveStreamReader,
     _cancel_proactive_preparations,
     capture_preparation_topology,
+    wait_for_terminal_cleanups,
 )
 from runtime_health import StreamRecovery
 
 handover_blocked = threading.Event()
 release_old_capture = threading.Event()
+old_release_finished = threading.Event()
+replacement_release_entered = threading.Event()
+release_replacement_capture = threading.Event()
+replacement_release_finished = threading.Event()
 shutdown = threading.Event()
 captures = []
 
 def cleanup_owned_children():
     release_old_capture.set()
+    release_replacement_capture.set()
     for capture in tuple(captures):
         try:
             capture.release()
@@ -1163,6 +1169,12 @@ class SyntheticOpenCvCapture:
             handover_blocked.set()
             if not release_old_capture.wait(8.0):
                 raise RuntimeError("handover release gate timed out")
+            old_release_finished.set()
+        else:
+            replacement_release_entered.set()
+            if not release_replacement_capture.wait(8.0):
+                raise RuntimeError("replacement release gate timed out")
+            replacement_release_finished.set()
         self.released = True
 
 def capture_factory(_source, cancel_event=None):
@@ -1248,8 +1260,31 @@ pre = capture_preparation_topology()
 admission_pre = AUXILIARY_DECODER_ADMISSION.snapshot()
 if pre["proactive_preparations"] != 1 or admission_pre["in_use"] != 1:
     raise SystemExit(5)
-release_old_capture.set()
+if not replacement_release_entered.wait(1.0):
+    raise SystemExit(9)
+if old_release_finished.is_set():
+    raise SystemExit(10)
+if AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"] != 1:
+    raise SystemExit(11)
+release_replacement_capture.set()
+if not replacement_release_finished.wait(1.0):
+    raise SystemExit(12)
+deadline = time.monotonic() + 1.0
+while (
+    AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"] != 0
+    and time.monotonic() < deadline
+):
+    time.sleep(0.01)
+if AUXILIARY_DECODER_ADMISSION.snapshot()["in_use"] != 0:
+    raise SystemExit(13)
+if old_release_finished.is_set():
+    raise SystemExit(14)
 reader.join(3.0)
+if reader.is_alive():
+    raise SystemExit(15)
+if wait_for_terminal_cleanups(0.0):
+    raise SystemExit(16)
+release_old_capture.set()
 cleanup.join(3.0)
 deadline = time.monotonic() + 1.0
 while time.monotonic() < deadline:
@@ -1264,7 +1299,7 @@ while time.monotonic() < deadline:
     ):
         break
     time.sleep(0.01)
-if reader.is_alive() or cleanup.is_alive() or cleanup_result != [True]:
+if cleanup.is_alive() or cleanup_result != [True]:
     raise SystemExit(6)
 if any(os.path.exists(f"/proc/{pid}") for pid in children):
     raise SystemExit(7)
@@ -1318,6 +1353,42 @@ print("DONE topology=zero children=reaped", flush=True)
         self.assertTrue(all(
             not os.path.exists(f"/proc/{pid}") for pid in child_pids
         ))
+
+    def test_promoted_reader_cleanup_counts_one_underlying_failure(self):
+        script = r'''
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from live_capture import (
+    _promote_reader_owned_cleanup,
+    _start_reader_owned_cleanup,
+    capture_preparation_topology,
+)
+
+def fail_once():
+    raise RuntimeError("synthetic reader-owned cleanup failure")
+
+owned = _start_reader_owned_cleanup(("owned", 1), fail_once)
+promoted = _promote_reader_owned_cleanup(owned)
+if not promoted.wait(1.0):
+    raise SystemExit(2)
+topology = capture_preparation_topology()
+if owned.succeeded() or not promoted.succeeded():
+    raise SystemExit(3)
+if topology["terminal_cleanups"] != 0:
+    raise SystemExit(4)
+if topology["terminal_cleanup_failures"] != 1:
+    raise SystemExit(5)
+print("DONE one-failure", flush=True)
+'''
+        process = subprocess.run(
+            [sys.executable, "-c", script, str(PERCEPTION_DIR)],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("DONE one-failure", process.stdout)
 
     def test_terminal_recovery_waits_for_active_clock_cleanup(self):
         resolver_entered = threading.Event()
