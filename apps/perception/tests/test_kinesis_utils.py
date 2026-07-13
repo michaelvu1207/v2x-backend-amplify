@@ -18,6 +18,7 @@ from kinesis_utils import (  # noqa: E402
     get_video_session_hls_url,
     resolve_hls_media_clock,
 )
+import kinesis_utils  # noqa: E402
 
 
 class Response:
@@ -56,6 +57,43 @@ class HlsMediaClockTests(unittest.TestCase):
             ))
 
         self.assertEqual(results, list(range(6)))
+        self.assertEqual(maximum_active, 2)
+
+    def test_normal_and_urgent_executors_share_the_same_decoder_cap(self):
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def matcher(value):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.05)
+                return value
+            finally:
+                with lock:
+                    active -= 1
+
+        futures = []
+        for value in range(6):
+            executor = (
+                kinesis_utils._NVDEC_URGENT_FRAGMENT_MATCH_EXECUTOR
+                if value % 2
+                else kinesis_utils._NVDEC_FRAGMENT_MATCH_EXECUTOR
+            )
+            futures.append(executor.submit(
+                _run_nvdec_fragment_match,
+                matcher,
+                (value,),
+                {},
+            ))
+
+        self.assertEqual(
+            [future.result(timeout=2.0) for future in futures],
+            list(range(6)),
+        )
         self.assertEqual(maximum_active, 2)
 
     def test_nvdec_fragment_admission_cancels_while_waiting(self):
