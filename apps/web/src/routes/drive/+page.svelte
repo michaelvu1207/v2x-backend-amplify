@@ -61,6 +61,7 @@
 	import CalibrationWizard from '$lib/components/CalibrationWizard.svelte';
 	import CameraViewComponent from '$lib/components/CameraView.svelte';
 	import HudOverlay from '$lib/components/HudOverlay.svelte';
+	import DriverDashboardConnected from '$lib/components/dashboard/DriverDashboardConnected.svelte';
 	import V2xToast from '$lib/components/V2xToast.svelte';
 	import V2xSignalPlacer from '$lib/components/V2xSignalPlacer.svelte';
 	import V2xZoneEditor from '$lib/components/V2xZoneEditor.svelte';
@@ -69,6 +70,7 @@
 	import TrafficPanel from '$lib/components/TrafficPanel.svelte';
 	import TrajectoryPanel from '$lib/components/TrajectoryPanel.svelte';
 	import TeleportPanel from '$lib/components/TeleportPanel.svelte';
+	import PacketLogPanel from '$lib/components/PacketLogPanel.svelte';
 	import CameraSettingsPanel from '$lib/components/CameraSettingsPanel.svelte';
 	import ScenarioPicker from '$lib/components/ScenarioPicker.svelte';
 	import TwinPanel from '$lib/components/TwinPanel.svelte';
@@ -109,6 +111,7 @@
 	let showCameraPanel = $state(false);
 	let showTrajectoryPanel = $state(false);
 	let showTeleportPanel = $state(false);
+	let showPacketPanel = $state(false);
 	let showXoscPicker = $state(false);
 
 	// Split-panel width for the right-side map (px). Persisted in localStorage.
@@ -127,8 +130,10 @@
 	type MapMode = 'panel' | 'overlay';
 	const MAP_MODE_STORAGE_KEY = 'drive-map-mode';
 	function loadStoredMapMode(): MapMode {
-		if (typeof localStorage === 'undefined') return 'panel';
-		return localStorage.getItem(MAP_MODE_STORAGE_KEY) === 'overlay' ? 'overlay' : 'panel';
+		// Default is the floating mini-map (overlay); the full right-side panel
+		// only when the user explicitly toggled to it (persisted preference).
+		if (typeof localStorage === 'undefined') return 'overlay';
+		return localStorage.getItem(MAP_MODE_STORAGE_KEY) === 'panel' ? 'panel' : 'overlay';
 	}
 	let mapMode = $state<MapMode>(loadStoredMapMode());
 	function toggleMapMode() {
@@ -430,22 +435,53 @@
 		inputMode = mode;
 	}
 
+	// Control send policy: event-driven + heartbeat.
+	// The server's physics ticks at 20 Hz and only reads the LATEST input per
+	// tick, so sending faster than that is pure overhead (the old
+	// requestAnimationFrame loop re-sent every display frame — 60-240 pkt/s).
+	// Instead: send immediately when the input changes (no added latency),
+	// plus a 20 Hz heartbeat so the server always has a fresh value.
+	const CONTROL_HEARTBEAT_MS = 50; // matches the server's 20 Hz tick
+
+	function currentInput() {
+		return inputMode === 'wheel' ? $normalizedInput : $keyboardInput;
+	}
+
 	function startControlLoop() {
 		if (controlLoopId !== null) return;
-		function loop() {
-			const input = inputMode === 'wheel' ? $normalizedInput : $keyboardInput;
+		controlLoopId = window.setInterval(() => {
+			const input = currentInput();
 			sendControl(input.steer, input.throttle, input.brake, input.reverse);
-			controlLoopId = requestAnimationFrame(loop);
-		}
-		controlLoopId = requestAnimationFrame(loop);
+		}, CONTROL_HEARTBEAT_MS);
 	}
 
 	function stopControlLoop() {
 		if (controlLoopId !== null) {
-			cancelAnimationFrame(controlLoopId);
+			clearInterval(controlLoopId);
 			controlLoopId = null;
 		}
 	}
+
+	// Immediate send on input change (keydown/keyup, wheel movement) so
+	// steering never waits for the next heartbeat. The keyboard store updates
+	// every animation frame (smooth steer ramping) even when values are
+	// unchanged, so dedupe identical values and enforce a minimum gap —
+	// otherwise this effect would re-create the per-frame flood.
+	const CONTROL_MIN_GAP_MS = 25;
+	let lastCtrlSent = { steer: NaN, throttle: NaN, brake: NaN, reverse: false, at: 0 };
+	$effect(() => {
+		const input = inputMode === 'wheel' ? $normalizedInput : $keyboardInput;
+		if (controlLoopId === null) return; // only while driving
+		const now = performance.now();
+		const changed =
+			input.steer !== lastCtrlSent.steer ||
+			input.throttle !== lastCtrlSent.throttle ||
+			input.brake !== lastCtrlSent.brake ||
+			input.reverse !== lastCtrlSent.reverse;
+		if (!changed || now - lastCtrlSent.at < CONTROL_MIN_GAP_MS) return;
+		lastCtrlSent = { steer: input.steer, throttle: input.throttle, brake: input.brake, reverse: input.reverse, at: now };
+		sendControl(input.steer, input.throttle, input.brake, input.reverse);
+	});
 
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -781,6 +817,13 @@
 				<CameraViewComponent bind:this={cameraViewRef} activeView={activeCamera} onSwitchView={handleCameraSwitch} />
 				<HudOverlay telemetry={currentTelemetry} isRecording={true} />
 
+				<!-- Tesla-style dashboard strip (gauge, throttle/brake bars, warnings)
+				     anchored to the bottom of the camera viewport. Was dropped
+				     accidentally by the a358b27 working-tree sync; restored. -->
+				<div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 pointer-events-auto" style="width: 94%; height: 95px;">
+					<DriverDashboardConnected />
+				</div>
+
 				{#if mapMode === 'overlay' && mapData}
 					<DriveMiniMap
 						roadLines={mapData.road_network}
@@ -824,35 +867,35 @@
 				<!-- Bottom action bar -->
 				<div class="absolute bottom-4 left-4 z-20 flex flex-col items-stretch gap-0.5 bg-black/40 backdrop-blur-md rounded-xl border border-white/10 p-1 shadow-lg pointer-events-auto">
 					<!-- Panel toggles -->
-					<button onclick={() => { showWeatherPanel = !showWeatherPanel; showTrafficPanel = false; showCameraPanel = false; showTrajectoryPanel = false; showTeleportPanel = false; }}
+					<button onclick={() => { showWeatherPanel = !showWeatherPanel; showTrafficPanel = false; showCameraPanel = false; showTrajectoryPanel = false; showTeleportPanel = false; showPacketPanel = false; }}
 						aria-pressed={showWeatherPanel}
 						class="px-3 py-1.5 rounded-lg text-xs font-medium tracking-wide transition-all duration-200 cursor-pointer {showWeatherPanel
 							? 'bg-cyan-600 text-white shadow-[0_0_8px_rgba(8,145,178,0.45)]'
 							: 'text-gray-300 hover:text-white hover:bg-white/5'}">
 						Weather
 					</button>
-					<button onclick={() => { showTrafficPanel = !showTrafficPanel; showWeatherPanel = false; showCameraPanel = false; showTrajectoryPanel = false; showTeleportPanel = false; }}
+					<button onclick={() => { showTrafficPanel = !showTrafficPanel; showWeatherPanel = false; showCameraPanel = false; showTrajectoryPanel = false; showTeleportPanel = false; showPacketPanel = false; }}
 						aria-pressed={showTrafficPanel}
 						class="px-3 py-1.5 rounded-lg text-xs font-medium tracking-wide transition-all duration-200 cursor-pointer {showTrafficPanel
 							? 'bg-amber-600 text-white shadow-[0_0_8px_rgba(217,119,6,0.45)]'
 							: 'text-gray-300 hover:text-white hover:bg-white/5'}">
 						Traffic
 					</button>
-					<button onclick={() => { showCameraPanel = !showCameraPanel; showWeatherPanel = false; showTrafficPanel = false; showTrajectoryPanel = false; showTeleportPanel = false; }}
+					<button onclick={() => { showCameraPanel = !showCameraPanel; showWeatherPanel = false; showTrafficPanel = false; showTrajectoryPanel = false; showTeleportPanel = false; showPacketPanel = false; }}
 						aria-pressed={showCameraPanel}
 						class="px-3 py-1.5 rounded-lg text-xs font-medium tracking-wide transition-all duration-200 cursor-pointer {showCameraPanel
 							? 'bg-cyan-600 text-white shadow-[0_0_8px_rgba(8,145,178,0.45)]'
 							: 'text-gray-300 hover:text-white hover:bg-white/5'}">
 						Camera
 					</button>
-					<button onclick={() => { showTrajectoryPanel = !showTrajectoryPanel; showWeatherPanel = false; showTrafficPanel = false; showCameraPanel = false; showTeleportPanel = false; }}
+					<button onclick={() => { showTrajectoryPanel = !showTrajectoryPanel; showWeatherPanel = false; showTrafficPanel = false; showCameraPanel = false; showTeleportPanel = false; showPacketPanel = false; }}
 						aria-pressed={showTrajectoryPanel}
 						class="px-3 py-1.5 rounded-lg text-xs font-medium tracking-wide transition-all duration-200 cursor-pointer {showTrajectoryPanel
 							? 'bg-blue-600 text-white shadow-[0_0_8px_rgba(37,99,235,0.45)]'
 							: 'text-gray-300 hover:text-white hover:bg-white/5'}">
 						Trajectory
 					</button>
-					<button onclick={() => { showTeleportPanel = !showTeleportPanel; showWeatherPanel = false; showTrafficPanel = false; showCameraPanel = false; showTrajectoryPanel = false; }}
+					<button onclick={() => { showTeleportPanel = !showTeleportPanel; showWeatherPanel = false; showTrafficPanel = false; showCameraPanel = false; showTrajectoryPanel = false; showPacketPanel = false; }}
 						aria-pressed={showTeleportPanel}
 						class="px-3 py-1.5 rounded-lg text-xs font-medium tracking-wide transition-all duration-200 cursor-pointer {showTeleportPanel
 							? 'bg-emerald-600 text-white shadow-[0_0_8px_rgba(5,150,105,0.45)]'
@@ -860,7 +903,15 @@
 						title="Teleport this session's ego to a coordinate">
 						Teleport
 					</button>
-					<button onclick={() => { showXoscPicker = !showXoscPicker; showTeleportPanel = false; }}
+					<button onclick={() => { showPacketPanel = !showPacketPanel; showWeatherPanel = false; showTrafficPanel = false; showCameraPanel = false; showTrajectoryPanel = false; showTeleportPanel = false; }}
+						aria-pressed={showPacketPanel}
+						class="px-3 py-1.5 rounded-lg text-xs font-medium tracking-wide transition-all duration-200 cursor-pointer {showPacketPanel
+							? 'bg-blue-600 text-white shadow-[0_0_8px_rgba(37,99,235,0.45)]'
+							: 'text-gray-300 hover:text-white hover:bg-white/5'}"
+						title="Live WebSocket wire log — every packet, verbatim">
+						Packets
+					</button>
+					<button onclick={() => { showXoscPicker = !showXoscPicker; showTeleportPanel = false; showPacketPanel = false; }}
 						aria-pressed={showXoscPicker}
 						class="px-3 py-1.5 rounded-lg text-xs font-medium tracking-wide transition-all duration-200 cursor-pointer {showXoscPicker
 							? 'bg-purple-600 text-white shadow-[0_0_8px_rgba(147,51,234,0.45)]'
@@ -920,7 +971,17 @@
 
 				<!-- Teleport Panel -->
 				{#if showTeleportPanel}
-					<TeleportPanel onClose={() => { showTeleportPanel = false; }} />
+					<TeleportPanel
+						onClose={() => { showTeleportPanel = false; }}
+						roadLines={mapData?.road_network ?? []}
+						originLat={mapData?.geo_ref?.origin_lat ?? null}
+						originLon={mapData?.geo_ref?.origin_lon ?? null}
+					/>
+				{/if}
+
+				<!-- Packet Log Panel -->
+				{#if showPacketPanel}
+					<PacketLogPanel onClose={() => { showPacketPanel = false; }} />
 				{/if}
 			</div>
 
