@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Power, PowerOff, Car, Trash2, ChevronRight, ChevronUp, ChevronDown, Circle,
   Play, Square, CircleDot, Plus, Save, FolderOpen, Gauge, ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
-  Pause, Download, Activity, Sun, Moon,
+  Pause, Download, Activity, Sun, Moon, Network,
 } from 'lucide-react'
 // Cockpit typography: B612 was designed for aircraft instrument displays
 // (Airbus/ENAC) — the body & data faces of this console. Archivo carries the
@@ -63,6 +63,7 @@ const CSS = `
 .modesw{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;padding:7px 11px;border:1px solid var(--line);border-radius:4px;background:var(--inset);color:var(--muted);cursor:pointer}
 .modesw:hover{color:var(--ink);border-color:var(--accent-line)}
 .modesw:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+a.modesw{text-decoration:none}
 
 /* ── bench (endpoint) row ── */
 .bench{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:12px}
@@ -336,7 +337,7 @@ const DocList = memo(function DocList() {
     <>
       <div className="h2">Datasheet — message reference</div>
       <p style={{ fontSize: 13, color: 'var(--muted)', margin: '6px 0 0', maxWidth: '78ch' }}>
-        The drive server speaks JSON over one WebSocket. <strong>Identity is the connection</strong> — each connection gets its own <code className="mono">DriveSession</code> and car (server-side role <code className="mono">ego_vehicle_&lt;hex&gt;</code>); the client-visible id is <code className="mono">vehicle_id</code> from <code className="mono">session_ready</code>. Two clients = two connections = two cars in one world.
+        The drive server speaks JSON over one WebSocket. <strong>Identity is the connection</strong> — each connection gets its own <code className="mono">DriveSession</code> and car (server-side role <code className="mono">ego_vehicle_&lt;hex&gt;</code>); the client-visible id is <code className="mono">vehicle_id</code> from <code className="mono">session_ready</code>. Two clients = two connections = two cars in one world. <a href="./diagram.html" target="_blank" rel="noopener" style={{ color: 'var(--accent)' }}>See the interactive routing diagram →</a>
       </p>
       <div className="docs">
         {DOCS.map((d, i) => (
@@ -729,6 +730,10 @@ export default function App() {
             </button>
           </div>
           <span className={`pill st-${status}`}><span className="dot" />{status}</span>
+          <a className="modesw" href="./diagram.html" target="_blank" rel="noopener"
+            title="How a connection becomes a car — interactive routing diagram (opens in a new tab)">
+            <Network className="icon-sm" /> Routing
+          </a>
           <button className="modesw" onClick={toggleTheme} title="Toggle day / night mode">
             {theme === 'night' ? <><Sun className="icon-sm" /> Day</> : <><Moon className="icon-sm" /> Night</>}
           </button>
