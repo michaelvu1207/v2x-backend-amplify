@@ -1,0 +1,63 @@
+{
+  "contract": "simforge.map-bundle-manifest.v1",
+  "bundle_version": "carla-0.10.0-22.06-v3-munich-20260715",
+  "map_name": "Carla/Maps/Richmond_Field_Station_Richmond_CA",
+  "normalized_map_name": "Richmond_Field_Station_Richmond_CA",
+  "created_at": "2026-07-15T02:36:04.954643Z",
+  "base": {
+    "schema_version": 1,
+    "source": {
+      "authority": "maintenance_materializer",
+      "map_asset_id": "richmond-field-station_20260410-185647",
+      "carla_version": "0.10.0",
+      "image": "ghcr.io/simforgeinc/carla-rr-maps:0.10.0_22.06_v3_munich_20260715",
+      "image_digest": "sha256:9cbd72bf3074904e315df7a51cde16c6815886ef98457abcd17d0202bd81161f",
+      "actor_catalog_version": null,
+      "actor_catalog_hash": null
+    }
+  },
+  "sections": {
+    "generated": {
+      "key": "map-bundles/carla-0.10.0-22.06-v3-munich-20260715/Richmond_Field_Station_Richmond_CA/generated.json.gz",
+      "sha256": "20f9646795f9e8dcf3f9c3cec806726a4c7599bd2f814cbf50270a910809762e",
+      "size_bytes_raw": 490268,
+      "size_bytes_stored": 84637,
+      "encoding": "json"
+    },
+    "runtime_meta": {
+      "key": "map-bundles/carla-0.10.0-22.06-v3-munich-20260715/Richmond_Field_Station_Richmond_CA/runtime_meta.json.gz",
+      "sha256": "a763613c3a821f71006d6c28fc23751f7c4398afe6897ec8326bfa152a922f6e",
+      "size_bytes_raw": 2153868,
+      "size_bytes_stored": 293155,
+      "encoding": "json"
+    },
+    "runtime_segments": {
+      "key": "map-bundles/carla-0.10.0-22.06-v3-munich-20260715/Richmond_Field_Station_Richmond_CA/runtime_segments.json.gz",
+      "sha256": "8368aea65d779e0d9dfba700834db94bc0407dade6abf39d1f0acd0d5518ff00",
+      "size_bytes_raw": 18793587,
+      "size_bytes_stored": 1654504,
+      "encoding": "json"
+    },
+    "environment_objects": {
+      "key": "map-bundles/carla-0.10.0-22.06-v3-munich-20260715/Richmond_Field_Station_Richmond_CA/environment_objects.json.gz",
+      "sha256": "82f242c3b949bbcb81e5295214c0d20920f8d31534e41fa678a76e803ee10092",
+      "size_bytes_raw": 2376003,
+      "size_bytes_stored": 291571,
+      "encoding": "json"
+    },
+    "street_furniture": {
+      "key": "map-bundles/carla-0.10.0-22.06-v3-munich-20260715/Richmond_Field_Station_Richmond_CA/street_furniture.json.gz",
+      "sha256": "5a833106200bc379aefabdc0a941b4d55693f371dd749f63674fc83fa6221d90",
+      "size_bytes_raw": 7402,
+      "size_bytes_stored": 1329,
+      "encoding": "json"
+    },
+    "xodr": {
+      "key": "map-bundles/carla-0.10.0-22.06-v3-munich-20260715/Richmond_Field_Station_Richmond_CA/xodr.xodr.gz",
+      "sha256": "1576737df37adb4caad6bef62210e060fcbf5c9a082ddd269515417616a36111",
+      "size_bytes_raw": 2106931,
+      "size_bytes_stored": 295987,
+      "encoding": "text"
+    }
+  }
+}
