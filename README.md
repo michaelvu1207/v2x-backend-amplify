@@ -8,6 +8,8 @@ Canonical repo for the V2X ingest API, CARLA bridge, and digital twin dashboard.
 apps/
   bridge/    Python bridge — connects CARLA to the V2X platform
   web/       SvelteKit dashboard deployed to Amplify
+assets/
+  richmond-field-station/  Richmond Field Station map and CARLA runtime assets
 scripts/
   launch-drive.sh   Start the drive server on the GPU server
 infra/
@@ -84,6 +86,24 @@ python -m digital_twin_bridge.drive_main
 ```
 
 The dashboard reads digital twin state and snapshot assets through the read API. The state bucket can remain private because the browser no longer needs direct S3 access.
+
+## Richmond Field Station Assets
+
+The repository includes the production Richmond Field Station map asset
+`richmond-field-station_20260410-185647` and its CARLA runtime support files:
+
+| Asset group | Files |
+| --- | --- |
+| Road geometry | [GeoJSON](assets/richmond-field-station/map/richmond-field-station_20260410-185647.geojson), [OpenDRIVE](assets/richmond-field-station/map/richmond-field-station_20260410-185647.xodr), [RoadRunner XML](assets/richmond-field-station/map/richmond-field-station_20260410-185647_rrdata.xml), [lane polygons](assets/richmond-field-station/map/richmond-field-station_20260410-185647.lane-polygons.geojson), and [signals](assets/richmond-field-station/map/richmond-field-station_20260410-185647.signals.geojson) |
+| Search and topology | [Search index](assets/richmond-field-station/map/richmond-field-station_20260410-185647.search-index.json) and [topology index](assets/richmond-field-station/map/richmond-field-station_20260410-185647.topology-index.json) |
+| Enrichment | [Candidate locations and overlay payload](assets/richmond-field-station/map/enrichment/) |
+| Media | [Full video](assets/richmond-field-station/map/richmond-field-station_20260410-185647.mp4), [preview video](assets/richmond-field-station/map/previews/richmond-field-station_20260410-185647.preview.mp4), and [thumbnail](assets/richmond-field-station/map/richmond-field-station_20260410-185647_thumbnail.png) |
+| 3D support metadata | [Environment, manifest, and vegetation instance data](assets/richmond-field-station/map/3d/) |
+| CARLA runtime | [Richmond runtime bundle](assets/richmond-field-station/carla-runtime/) and [actor catalog](assets/richmond-field-station/actor-catalog.json) |
+
+The large 3D tile `.glb` files and the source `.fbx` model are intentionally
+excluded. The retained 3D manifest is provided as metadata and provenance, so
+its references to those omitted geometry files do not resolve in this repo.
 
 ## Live Video
 
