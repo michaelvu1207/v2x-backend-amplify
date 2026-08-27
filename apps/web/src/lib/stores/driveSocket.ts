@@ -78,6 +78,8 @@ export const teleportStatus = writable<TeleportStatus>({
 });
 // Aspect ratio of the streamed ego camera (updated by CameraSettingsPanel).
 export const cameraAspect = writable<{ w: number; h: number }>({ w: 720, h: 720 });
+// Bird's-eye camera altitude in meters (null until the server acks a zoom).
+export const birdAltitude = writable<number | null>(null);
 
 // OpenSCENARIO (.xosc) state
 export const xoscScenarioList = writable<XoscScenarioInfo[]>([]);
@@ -187,7 +189,12 @@ function recordWire(
 		// (start_session, session_ready, teleport…) survive the control/
 		// telemetry/frame flood instead of scrolling out of the buffer.
 		const evictIdx = wireBuf.findIndex(
-			(p) => p.ptype === 'control' || p.ptype === 'telemetry' || p.kind === 'bin'
+			(p) =>
+				p.ptype === 'control' ||
+				p.ptype === 'telemetry' ||
+				p.ptype === 'camera_zoom' ||
+				p.ptype === 'camera_zoomed' ||
+				p.kind === 'bin'
 		);
 		wireBuf.splice(evictIdx === -1 ? 0 : evictIdx, 1);
 	}
@@ -492,6 +499,12 @@ function handleServerMessage(msg: DriveMessage): void {
 			// Acknowledged — no state change needed
 			break;
 
+		case 'camera_zoomed':
+			if (typeof msg.altitude === 'number') {
+				birdAltitude.set(msg.altitude);
+			}
+			break;
+
 		case 'teleported':
 			if (get(teleportStatus).state !== 'pending') {
 				console.warn('[DriveWS] Ignoring unsolicited teleport acknowledgement');
@@ -664,6 +677,14 @@ export function sendControl(steer: number, throttle: number, brake: number, reve
 
 export function switchCamera(view: CameraView): void {
 	send({ type: 'camera_switch', view });
+}
+
+export function zoomCamera(factor: number): void {
+	send({ type: 'camera_zoom', factor });
+}
+
+export function resetCameraZoom(): void {
+	send({ type: 'camera_zoom', reset: true });
 }
 
 export function respawnVehicle(): void {

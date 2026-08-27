@@ -39,6 +39,9 @@
 		startSession,
 		sendControl,
 		switchCamera,
+		zoomCamera,
+		resetCameraZoom,
+		birdAltitude,
 		endSession,
 		respawnVehicle,
 		clearNonEgoVehicles,
@@ -772,7 +775,8 @@
 									['A/D', 'Steer'], ['Space', 'Brake'],
 									['R', 'Respawn'], ['1-4', 'Camera'],
 									['P', 'Place Obj'], ['V', 'V2X Signal'],
-									['U', 'Undo'], ['X', 'Scenarios']
+									['U', 'Undo'], ['X', 'Scenarios'],
+									['Scroll', 'Zoom (Bird)'], ['0', 'Zoom Reset']
 								] as [key, action]}
 									<div class="flex items-center gap-2">
 										<kbd class="px-1.5 py-0.5 bg-gray-800 border border-gray-700 rounded text-[10px] font-mono text-gray-400 min-w-[28px] text-center">{key}</kbd>
@@ -813,7 +817,13 @@
 		<div class="flex h-full w-full">
 			<!-- Left: Camera feed + HUD -->
 			<div class="relative flex-1 min-w-0">
-				<CameraViewComponent bind:this={cameraViewRef} activeView={activeCamera} onSwitchView={handleCameraSwitch} />
+				<CameraViewComponent
+					bind:this={cameraViewRef}
+					activeView={activeCamera}
+					onSwitchView={handleCameraSwitch}
+					onZoom={zoomCamera}
+					onZoomReset={resetCameraZoom}
+				/>
 				<!-- Classic on-camera HUD (throttle/brake bars, speed, steering dot) —
 				     reverted to the pre-dashboard-overhaul look by user request. -->
 				<HudOverlay telemetry={currentTelemetry} isRecording={true} />
@@ -842,6 +852,14 @@
 						</button>
 					{/each}
 				</div>
+
+				<!-- Bird's-eye altitude readout (below the camera switcher) -->
+				{#if activeCamera === 'bird' && $birdAltitude !== null}
+					<div class="absolute top-16 right-4 z-20 flex items-center gap-1.5 bg-black/40 backdrop-blur-md rounded-lg border border-white/10 px-2.5 py-1 shadow-lg pointer-events-none">
+						<span class="text-[10px] font-medium text-gray-400 tracking-wide">ALT</span>
+						<span class="text-xs font-mono text-gray-200">{Math.round($birdAltitude)}m</span>
+					</div>
+				{/if}
 
 				<!-- Status badges (top-left) — hidden in overlay-map mode to avoid collision with the floating mini-map -->
 				<div class="absolute top-4 left-4 z-20 flex items-center gap-2 bg-black/40 backdrop-blur-md rounded-xl border border-white/10 px-3 py-1.5 shadow-lg pointer-events-auto {mapMode === 'overlay' ? 'hidden' : ''}">

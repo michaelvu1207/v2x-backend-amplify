@@ -123,6 +123,7 @@ class MockActor:
         self.attributes: dict[str, str] = {}
         self.physics_enabled = True
         self._listener = None
+        self.set_location_calls: list[MockLocation] = []
 
     def listen(self, callback) -> None:
         self._listener = callback
@@ -158,6 +159,12 @@ class MockActor:
 
     def set_transform(self, transform: MockTransform) -> None:
         self._transform = transform
+
+    def set_location(self, location: MockLocation) -> None:
+        # Real CARLA interprets this as parent-relative on attached actors;
+        # the mock records calls so tests can assert in-place moves.
+        self.set_location_calls.append(location)
+        self._transform = MockTransform(location=location, rotation=self._transform.rotation)
 
     def set_target_velocity(self, velocity: MockLocation) -> None:
         self._velocity = velocity

@@ -5,24 +5,75 @@
 	interface Props {
 		activeView: CameraView;
 		onSwitchView: (view: CameraView) => void;
+		onZoom?: (factor: number) => void;
+		onZoomReset?: () => void;
 	}
-	let { activeView, onSwitchView }: Props = $props();
+	let { activeView, onSwitchView, onZoom, onZoomReset }: Props = $props();
 
 	let imgSrc = $state<string | null>(null);
 	let frameCount = $state(0);
 
-	// Keyboard shortcuts for camera views
+	// Keyboard zoom step per press; matches one wheel notch.
+	const KEY_ZOOM_STEP = 1.15;
+
+	// Keyboard shortcuts for camera views + bird's-eye zoom
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 		const view = CAMERA_VIEWS.find((v) => v.key === e.key);
 		if (view) {
 			onSwitchView(view.id as CameraView);
+			return;
+		}
+		if (activeView !== 'bird') return;
+		if (e.key === '+' || e.key === '=') {
+			onZoom?.(1 / KEY_ZOOM_STEP);
+		} else if (e.key === '-' || e.key === '_') {
+			onZoom?.(KEY_ZOOM_STEP);
+		} else if (e.key === '0') {
+			onZoomReset?.();
+		}
+	}
+
+	// Bird's-eye wheel zoom: coalesce deltas into one multiplicative factor
+	// per flush so a fast scroll doesn't flood the WebSocket.
+	const ZOOM_FLUSH_MS = 60;
+	const PX_PER_LINE = 16;
+	let pendingZoom = 1;
+	let zoomFlushId: number | null = null;
+
+	function flushZoom() {
+		zoomFlushId = null;
+		if (pendingZoom !== 1) {
+			onZoom?.(pendingZoom);
+			pendingZoom = 1;
+		}
+	}
+
+	function handleWheel(e: WheelEvent) {
+		if (activeView !== 'bird') return;
+		e.preventDefault();
+		let dy = e.deltaY;
+		if (e.deltaMode === 1) dy *= PX_PER_LINE;
+		else if (e.deltaMode === 2) dy *= window.innerHeight || 800;
+		dy = Math.max(-100, Math.min(100, dy));
+		// Scroll down zooms out (camera climbs); ctrl+wheel is trackpad
+		// pinch, which reports tiny deltas, so it gets a stronger gain.
+		const k = e.ctrlKey ? 0.01 : 0.0015;
+		pendingZoom *= Math.exp(dy * k);
+		if (zoomFlushId === null) {
+			zoomFlushId = window.setTimeout(flushZoom, ZOOM_FLUSH_MS);
 		}
 	}
 
 	$effect(() => {
 		window.addEventListener('keydown', handleKeydown);
-		return () => window.removeEventListener('keydown', handleKeydown);
+		return () => {
+			window.removeEventListener('keydown', handleKeydown);
+			if (zoomFlushId !== null) {
+				clearTimeout(zoomFlushId);
+				zoomFlushId = null;
+			}
+		};
 	});
 
 	/**
@@ -41,7 +92,7 @@
 	}
 </script>
 
-<div class="relative w-full h-full bg-black">
+<div class="relative w-full h-full bg-black" onwheel={handleWheel}>
 	{#if imgSrc}
 		<!-- MJPEG frame display -->
 		<img src={imgSrc} alt="CARLA camera feed"

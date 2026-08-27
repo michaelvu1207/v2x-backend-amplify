@@ -135,6 +135,20 @@ SAFE_CAMERA_ATTR_LIMITS = {
     "lens_circle_falloff": (4.0, 8.0),
 }
 
+# Bird's-eye zoom: the top-down camera dollies up/down by scaling its
+# parent-relative altitude.  On a Rigid-attached sensor set_location is
+# parent-relative and preserves the attachment (verified against CARLA
+# 0.10.0; set_transform is world-space and detaches), so zooming needs no
+# sensor respawn and never drops a frame.  FOV zoom is not an option —
+# blueprint attributes are immutable after spawn.
+BIRD_ZOOM_DEFAULT_ALTITUDE_M = 25.0
+BIRD_ZOOM_MIN_ALTITUDE_M = 8.0
+BIRD_ZOOM_MAX_ALTITUDE_M = 100.0
+# Per-message factor bounds: a wheel gesture coalesces to small steps, so a
+# huge single factor is either a bug or a hostile message.
+BIRD_ZOOM_MIN_STEP_FACTOR = 0.2
+BIRD_ZOOM_MAX_STEP_FACTOR = 5.0
+
 # Traffic presets
 TRAFFIC_PRESETS = {
     "none":   {"vehicles": 0,   "speed_diff": 0,   "distance": 2.0, "ignore_lights": 0,  "ignore_signs": 0},
@@ -496,6 +510,9 @@ class DriveSession:
         self._camera_fov = 90.0
         # Custom post-processing attrs persisted across set_camera_settings respawns.
         self._camera_extra_attrs: dict[str, str] = {}
+        # Bird's-eye dolly altitude (m above the vehicle), adjusted via
+        # camera_zoom messages; persists across view switches and respawns.
+        self._bird_altitude = BIRD_ZOOM_DEFAULT_ALTITUDE_M
         # Vehicle bounding-box half-extents, populated after spawn. Camera
         # transforms scale by these so they fit any vehicle (matches the
         # bound_x/y/z idiom in CARLA's manual_control.py).
@@ -735,8 +752,12 @@ class DriveSession:
                 carla.Rotation(pitch=6.0),
             )
         if view == "bird":
-            # No equivalent in manual_control — true top-down for the map view
-            return carla.Transform(carla.Location(x=0.0, z=25.0), carla.Rotation(pitch=-90.0))
+            # No equivalent in manual_control — true top-down for the map
+            # view.  Altitude is the zoom level (see zoom_camera).
+            return carla.Transform(
+                carla.Location(x=0.0, z=self._bird_altitude),
+                carla.Rotation(pitch=-90.0),
+            )
         # chase (default): manual_control index 0, with z slightly raised
         # because the SpringArmGhost settled position lags below the
         # configured offset, so the configured z has to be a touch above
@@ -2176,6 +2197,43 @@ class DriveSession:
         self.active_camera = view
         self._update_camera_transform()
 
+    def zoom_camera(self, factor: float = 1.0, reset: bool = False) -> dict:
+        """Zoom the bird's-eye view by scaling the camera's altitude.
+
+        factor > 1 zooms out (camera climbs), factor < 1 zooms in, clamped
+        to [BIRD_ZOOM_MIN_ALTITUDE_M, BIRD_ZOOM_MAX_ALTITUDE_M].  Applied
+        in place with set_location — parent-relative on attached sensors —
+        so the camera stays glued to the vehicle with no respawn.
+        """
+        if reset:
+            new_altitude = BIRD_ZOOM_DEFAULT_ALTITUDE_M
+        else:
+            factor = float(factor)
+            if not math.isfinite(factor) or not (
+                BIRD_ZOOM_MIN_STEP_FACTOR <= factor <= BIRD_ZOOM_MAX_STEP_FACTOR
+            ):
+                raise ValueError(
+                    f"Invalid zoom factor: {factor}. Must be within "
+                    f"[{BIRD_ZOOM_MIN_STEP_FACTOR}, {BIRD_ZOOM_MAX_STEP_FACTOR}]"
+                )
+            new_altitude = max(
+                BIRD_ZOOM_MIN_ALTITUDE_M,
+                min(BIRD_ZOOM_MAX_ALTITUDE_M, self._bird_altitude * factor),
+            )
+        self._bird_altitude = new_altitude
+        if self.active_camera == "bird" and self._camera_sensor is not None:
+            try:
+                import carla
+                self._camera_sensor.set_location(carla.Location(z=new_altitude))
+            except Exception as e:
+                logger.warning("Failed to apply bird zoom altitude: %s", e)
+        return {
+            "type": "camera_zoomed",
+            "altitude": round(new_altitude, 2),
+            "min": BIRD_ZOOM_MIN_ALTITUDE_M,
+            "max": BIRD_ZOOM_MAX_ALTITUDE_M,
+        }
+
     def end(self) -> dict:
         """End the session: destroy camera, vehicle, cleanup scene."""
         self._force_cleanup()
@@ -2379,6 +2437,11 @@ async def handle_message(session: DriveSession, msg: dict, map_controller=None) 
         elif msg_type == "camera_switch":
             session.switch_camera(msg["view"])
             return {"type": "camera_switched", "view": msg["view"]}
+        elif msg_type == "camera_zoom":
+            return session.zoom_camera(
+                factor=msg.get("factor", 1.0),
+                reset=bool(msg.get("reset", False)),
+            )
         elif msg_type == "set_weather":
             return session.set_weather(msg.get("params", {}))
         elif msg_type == "set_camera_settings":
