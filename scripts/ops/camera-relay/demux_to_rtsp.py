@@ -70,6 +70,7 @@ class Relay:
                 process.wait()
 
     def start_ffmpeg(self) -> subprocess.Popen[bytes]:
+        timestamp_step = round(90_000 / self.frame_rate)
         process = subprocess.Popen(
             [
                 "/usr/bin/ffmpeg",
@@ -85,6 +86,8 @@ class Relay:
                 "-an",
                 "-c:v",
                 "copy",
+                "-bsf:v",
+                f"setts=ts=N*{timestamp_step}:duration={timestamp_step}:time_base=1/90000",
                 "-f",
                 "rtsp",
                 "-rtsp_transport",
@@ -213,6 +216,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rtsp", required=True)
     parser.add_argument("--framerate", type=float, default=30.0)
     args = parser.parse_args()
+    if args.framerate <= 0:
+        parser.error("--framerate must be positive")
     if args.channel not in range(4):
         parser.error("--channel must be 0..3")
     expected_path = f"ch{args.channel + 1}"
