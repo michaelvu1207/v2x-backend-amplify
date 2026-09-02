@@ -7,7 +7,7 @@ Requires=mediamtx.service
 Type=simple
 User=v2x-camera
 Group=v2x-camera
-ExecStart=/bin/sh -c 'channel="$1"; path="ch$((channel + 1))"; exec /usr/bin/python3 /opt/v2x-camera/demux_to_rtsp.py --channel "$channel" --path "$path" --socket "/tmp/camera_demux_ch%i.sock" --rtsp "rtsp://127.0.0.1:8554/$path"' sh %i
+ExecStart=/bin/sh -c 'channel="$$1"; path="ch$$((channel + 1))"; exec /usr/bin/python3 /opt/v2x-camera/demux_to_rtsp.py --channel "$$channel" --path "$$path" --socket "/tmp/camera_demux_ch%i.sock" --rtsp "rtsp://127.0.0.1:8554/$$path"' sh %i
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

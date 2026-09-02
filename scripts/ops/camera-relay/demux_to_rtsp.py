@@ -211,7 +211,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--path", required=True)
     parser.add_argument("--socket", required=True)
     parser.add_argument("--rtsp", required=True)
-    parser.add_argument("--framerate", type=float, default=25.0)
+    parser.add_argument("--framerate", type=float, default=30.0)
     args = parser.parse_args()
     if args.channel not in range(4):
         parser.error("--channel must be 0..3")

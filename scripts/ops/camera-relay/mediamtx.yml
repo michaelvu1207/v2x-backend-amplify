@@ -12,7 +12,7 @@ hls: yes
 hlsAddress: 127.0.0.1:8888
 hlsAlwaysRemux: yes
 hlsVariant: lowLatency
-hlsSegmentCount: 5
+hlsSegmentCount: 7
 
 webrtc: no
 srt: no
