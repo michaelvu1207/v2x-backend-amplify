@@ -1,5 +1,5 @@
 [Unit]
-Description=Restart V2X CARLA drive stack
+Description=Nightly restart of the V2X CARLA drive stack
 Wants=docker.service
 After=docker.service network-online.target
 

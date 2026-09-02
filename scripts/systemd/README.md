@@ -9,7 +9,7 @@ These tracked definitions supervise the V2X Drive stack from
 | `v2x-drive.service` | Starts `digital_twin_bridge` after CARLA is ready |
 | `v2x-cloudflared-drive.service` | Publishes the drive WebSocket tunnel |
 | `v2x-drive-link-health.service` / `.timer` | Checks the public drive link every five minutes |
-| `v2x-hourly-drive-restart.service` / `.timer` | Restarts CARLA and the drive server at 04:00 local time; the legacy filename is retained for in-place updates |
+| `v2x-nightly-drive-restart.service` / `.timer` | Restarts CARLA and the drive server at 04:00 local time (replaces the former hourly unit) |
 | `v2x-web.service` | Optional path-rfs Vite development server from `apps/drive-web` |
 
 Perception is not part of this unit set. Install it from the separate
@@ -26,7 +26,7 @@ sudo systemctl enable --now \
   v2x-drive.service \
   v2x-cloudflared-drive.service \
   v2x-drive-link-health.timer \
-  v2x-hourly-drive-restart.timer
+  v2x-nightly-drive-restart.timer
 ```
 
 The units use absolute repository paths. Reinstall every unit listed in

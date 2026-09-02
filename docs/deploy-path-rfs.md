@@ -22,7 +22,7 @@ Reinstall these units whenever the checkout moves:
 | `v2x-cloudflared-drive.service` | `scripts/launch-cloudflared-drive-tunnel.sh` |
 | `v2x-drive-link-health.service` | repository root and `scripts/check-drive-frontend-link.sh` / `scripts/publish-drive-tunnel-config.sh` |
 | `v2x-drive.service` | repository root and `scripts/wait-for-carla.sh` / `scripts/launch-drive.sh` |
-| `v2x-hourly-drive-restart.service` | repository root and `scripts/restart-drive-stack.sh` / `scripts/publish-drive-tunnel-config.sh` |
+| `v2x-nightly-drive-restart.service` | repository root and `scripts/restart-drive-stack.sh` / `scripts/publish-drive-tunnel-config.sh` |
 | `v2x-web.service` | `apps/drive-web` |
 
 Install the tracked definitions and reload systemd:
@@ -33,9 +33,12 @@ sudo install -m 0644 scripts/systemd/*.service scripts/systemd/*.timer /etc/syst
 sudo systemctl daemon-reload
 ```
 
-The legacy unit filename `v2x-hourly-drive-restart.timer` is retained so an
-existing installation updates in place; its tracked schedule is 04:00 local
-time, not hourly.
+`v2x-nightly-drive-restart.timer` replaces the former
+`v2x-hourly-drive-restart.timer`. When updating an installation that still has
+the hourly unit, disable and remove it before enabling the nightly timer:
+`sudo systemctl disable --now v2x-hourly-drive-restart.timer && sudo rm
+/etc/systemd/system/v2x-hourly-drive-restart.{service,timer}`. The tracked
+schedule is 04:00 local time.
 
 The drive WebSocket listens on `:8765`. nginx owns public TLS and routes `/ws` to
 that local socket. Perception is installed from the separate
