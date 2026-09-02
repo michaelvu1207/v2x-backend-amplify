@@ -2,7 +2,7 @@
 
 This installs MediaMTX **v1.20.1** and four supervised, copy-only H.264 publishers on path-rfs. Each publisher subscribes to `/tmp/camera_demux_ch0.sock` through `ch3`, strips the demux framing, and sends the Annex-B access units to MediaMTX as public path names `ch1` through `ch4`. It never opens another camera RTSP session and does not alter the existing AWS Kinesis Video Streams uploader.
 
-MediaMTX listens only on loopback: RTSP at `127.0.0.1:8554` and low-latency HLS at `127.0.0.1:8888`. nginx exposes HLS under `/camera/`. WebRTC, RTMP, SRT, and the MediaMTX API are disabled. The adapter and ffmpeg copy the encoded H.264 stream without transcoding.
+MediaMTX listens only on loopback: RTSP at `127.0.0.1:8554` and low-latency HLS at `127.0.0.1:8888`. nginx exposes HLS under `/camera/`. WebRTC, RTMP, SRT, MoQ, and the MediaMTX API are disabled. The adapter and ffmpeg copy the encoded H.264 stream without transcoding.
 
 Run from the repository checkout on path-rfs:
 

@@ -16,6 +16,7 @@ hlsSegmentCount: 5
 
 webrtc: no
 srt: no
+moq: no
 
 pathDefaults:
   source: publisher
