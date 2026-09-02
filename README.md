@@ -1,161 +1,86 @@
-# v2x-backend
+# V2X Drive
 
-Canonical repo for the V2X ingest API, CARLA bridge, and digital twin dashboard.
+V2X Drive is the CARLA 0.10 driving and V2X dashboard used at Richmond Field Station.
+The canonical repository is [`path2v2x/v2x-drive`](https://github.com/path2v2x/v2x-drive).
 
-## Repo Structure
+## Components
 
-```
-apps/
-  bridge/    Python bridge — connects CARLA to the V2X platform
-  web/       SvelteKit dashboard deployed to Amplify
-assets/
-  richmond-field-station/  Selected Richmond Field Station map assets
-scripts/
-  launch-drive.sh   Start the drive server on the GPU server
-infra/
-  aws-cli/   Provision DynamoDB, Lambda, IoT Core, API Gateway, S3, KVS
-  amplify/   Deploy the web dashboard to AWS Amplify
-```
-
-## Quick Start
-
-```bash
-# Install
-make web-install
-make bridge-install
-
-# Develop
-make web-dev          # SvelteKit dev server
-make bridge-dry-run   # Bridge dry-run (no CARLA needed)
-
-# Deploy
-make deploy-web       # Deploy dashboard to Amplify
-```
-
-## Canonical Workflow
-
-1. Provision the backend data plane and API:
-
-```bash
-cd infra/aws-cli
-./provision.sh
-./provision-read-api.sh
-./provision-write-api.sh
-./provision-state-bucket.sh
-AWS_REGION=us-west-2 ./provision-video-streams.sh
-```
-
-2. Deploy the dashboard:
-
-```bash
-cd infra/amplify
-API_BASE_URL="https://<api-id>.execute-api.us-west-1.amazonaws.com" \
-./deploy.sh
-```
-
-3. Run the bridge (drive mode):
-
-```bash
-./scripts/launch-drive.sh
-```
-
-Or manually:
-
-```bash
-cd apps/bridge
-source /path/to/carla-venv/bin/activate
-DTB_V2X_API_URL="https://<api-id>.execute-api.us-west-1.amazonaws.com/detections/recent" \
-python -m digital_twin_bridge.drive_main
-```
-
-## Runtime Config
-
-`apps/web/static/config.json` and the Amplify deployment expect:
-
-```json
-{
-  "apiBaseUrl": "https://<api-id>.execute-api.us-west-1.amazonaws.com",
-  "stateBaseUrl": "https://<api-id>.execute-api.us-west-1.amazonaws.com",
-  "statePath": "/state",
-  "mapDataPath": "/map-data",
-  "videoCameraIds": ["ch1", "ch2", "ch3", "ch4"],
-  "perceptionStreamUrls": {},
-  "perceptionStreamBaseUrl": "",
-  "perceptionStreamPathTemplate": "/streams/{camera_id}.mjpg"
-}
-```
-
-The dashboard reads digital twin state and snapshot assets through the read API. The state bucket can remain private because the browser no longer needs direct S3 access.
-
-## Richmond Field Station Assets
-
-The repository includes nine files from the production Richmond Field Station
-map asset `richmond-field-station_20260410-185647`:
-
-| Asset group | Files |
+| Path | Purpose |
 | --- | --- |
-| Road geometry | [GeoJSON](assets/richmond-field-station/map/richmond-field-station_20260410-185647.geojson), [OpenDRIVE](assets/richmond-field-station/map/richmond-field-station_20260410-185647.xodr), [RoadRunner XML](assets/richmond-field-station/map/richmond-field-station_20260410-185647_rrdata.xml), [lane polygons](assets/richmond-field-station/map/richmond-field-station_20260410-185647.lane-polygons.geojson), and [signals](assets/richmond-field-station/map/richmond-field-station_20260410-185647.signals.geojson) |
-| Search and topology | [Search index](assets/richmond-field-station/map/richmond-field-station_20260410-185647.search-index.json) and [topology index](assets/richmond-field-station/map/richmond-field-station_20260410-185647.topology-index.json) |
-| Media | [Full video](assets/richmond-field-station/map/richmond-field-station_20260410-185647.mp4) and [thumbnail](assets/richmond-field-station/map/richmond-field-station_20260410-185647_thumbnail.png) |
+| `apps/drive-server` | Python `digital_twin_bridge` WebSocket drive server and CARLA integration |
+| `apps/drive-web` | SvelteKit dashboard served at [path2v2x.net](https://path2v2x.net) |
+| `apps/dev-console` | Local developer console for the drive WebSocket API |
+| `infra/aws-cli` | AWS ingest/read API, state, and video-stream provisioning |
+| `infra/amplify` | Amplify hosting and runtime configuration |
 
-All other map artifacts are intentionally excluded, including CARLA runtime,
-enrichment, preview, 3D support, `.glb`, and `.fbx` files.
+## Runtime on path-rfs
 
-## Live Video
+The production checkout convention is `/home/path/v2x-drive`. CARLA runs in the
+`carla-rr-maps` Docker container. The drive server connects to CARLA on ports
+2000-2002 and listens for WebSocket clients on `:8765`; nginx exposes that socket
+at `wss://<host>/ws` on `:443`.
 
-- Kinesis Video Streams are provisioned in `us-west-2`
-- Camera stream names default to: `v2x-backend-cam-ch1` through `v2x-backend-cam-ch4`
-- The API exposes `GET /video/session/{camera_id}` and returns a short-lived HLS URL
-- The dashboard requests HLS sessions through the API; browser clients do not use AWS credentials directly
-- `/live` prefers `perceptionStreamUrls[cameraId]` when configured, then falls back to the raw
-  Kinesis HLS session. It can also build URLs from `perceptionStreamBaseUrl`, using
-  `/streams/{camera_id}.mjpg` by default. Use this for Path PC object-detection output with bounding boxes:
+systemd supervises CARLA, the drive server, the drive tunnel, and the drive-link
+watchdog. The tracked restart timer runs the CARLA/drive restart at 04:00 local
+time. See [`docs/deploy-path-rfs.md`](docs/deploy-path-rfs.md) for checkout and
+unit path conventions.
 
-```json
-{
-  "perceptionStreamBaseUrl": "https://perception.path2v2x.net"
-}
-```
+## Web hosting
 
-The perception service should upload detection records to `POST /detections` using the same schema shown
-on the Objects DB documentation tab. The `/live` page shows the recent Objects DB table below the camera
-grid, so detections posted by the Path PC will appear there without leaving Street View.
+AWS Amplify app `v2x-backend` (app ID `d1ugco1rmb7yjj`) serves
+[path2v2x.net](https://path2v2x.net). That live AWS name is intentionally
+unchanged. Amplify follows the `main` branch of the fast-forward mirror
+[`michaelvu1207/v2x-drive-amplify`](https://github.com/michaelvu1207/v2x-drive-amplify),
+which mirrors canonical `path2v2x/v2x-drive`.
 
-## Perception App
+## Perception stream interface
 
-The object detection/localization pipeline from `path2v2x/co-perception` now lives in
-`apps/perception`. Run it from this repo on the Path PC with:
+Perception is owned by the sibling
+[`path2v2x/co-perception`](https://github.com/path2v2x/co-perception) repository
+and runs on path-rfs from the local camera sockets. There is no perception app or
+perception service definition in this repository.
 
-```bash
-python3.10 -m venv /home/path/V2XCarla/perception-venv
-/home/path/V2XCarla/perception-venv/bin/pip install -r apps/perception/requirements.txt
-sudo install -m 0755 scripts/launch-perception.sh /home/path/V2XCarla/v2x-backend/scripts/launch-perception.sh
-sudo install -m 0644 scripts/systemd/v2x-perception.service /etc/systemd/system/v2x-perception.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now v2x-perception.service
-```
+The dashboard retains the runtime settings `perceptionStreamUrls`,
+`perceptionStreamBaseUrl`, and `perceptionStreamPathTemplate` for its annotated
+camera feeds. The producer's public stream is
+`wss://<host>/perception/ws`. Each binary WebSocket message is one JPEG frame
+prefixed by a single channel byte. nginx routes `/perception/ws` to
+`127.0.0.1:8766` on path-rfs. Deployment configuration must point the dashboard's
+perception stream settings at endpoints produced by `co-perception`; raw Kinesis
+HLS remains the dashboard fallback when no annotated stream is configured.
 
-The service starts with `V2X_PERCEPTION_UPLOAD=false`; enable uploads after validating calibration and
-model output. With `V2X_PERCEPTION_STREAM_PORT=8090`, the service publishes:
+The live AWS camera stream names remain `v2x-backend-cam-ch1` through
+`v2x-backend-cam-ch4`.
 
-```text
-http://<path-pc-host>:8090/streams/ch1.mjpg
-http://<path-pc-host>:8090/streams/ch2.mjpg
-http://<path-pc-host>:8090/streams/ch3.mjpg
-http://<path-pc-host>:8090/streams/ch4.mjpg
-```
-
-## GPU Server
-
-The drive server runs on the GPU server (`100.72.252.40` via Tailscale). After pulling changes:
+## Local development
 
 ```bash
-cd /home/path/V2XCarla/v2x-backend
-git pull
+make drive-web-install
+make drive-web-dev
+```
+
+Run the drive server without CARLA:
+
+```bash
+make drive-server-install
+make drive-server-dry-run
+```
+
+Run the developer console:
+
+```bash
+cd apps/dev-console
+npm ci
+npm run dev
+```
+
+To run against CARLA, activate a compatible CARLA Python environment and use:
+
+```bash
 ./scripts/launch-drive.sh
 ```
 
-## Notes
+## Related repositories
 
-- The MQTT topic pattern remains `v2x/v1/detections/+/+`.
-- `infra/aws-cli/decommission-legacy-v2x.sh` is the post-cutover cleanup entrypoint for the old `v2x-detections-*` stack.
+- [`path2v2x/v2x-digital-twin`](https://github.com/path2v2x/v2x-digital-twin) — standalone digital twin
+- [`path2v2x/co-perception`](https://github.com/path2v2x/co-perception) — production multi-camera perception
