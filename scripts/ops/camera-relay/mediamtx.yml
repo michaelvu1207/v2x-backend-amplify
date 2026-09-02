@@ -10,6 +10,10 @@ rtmp: no
 
 hls: yes
 hlsAddress: 127.0.0.1:8888
+hlsAllowOrigins:
+  - https://path2v2x.net
+  - https://drive.path2v2x.net
+  - https://twin.path2v2x.net
 hlsAlwaysRemux: yes
 hlsVariant: lowLatency
 hlsSegmentCount: 7

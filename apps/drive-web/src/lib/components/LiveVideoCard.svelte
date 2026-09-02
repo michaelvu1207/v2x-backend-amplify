@@ -81,15 +81,23 @@
 		connected = false;
 	}
 
-	async function attachHls(url: string, index: 0 | 1) {
+	async function attachHls(url: string, index: 0 | 1, useCredentials = false) {
 		destroySlot(index);
 		const video = videoAt(index);
 		if (!video) throw new Error('Video element unavailable');
+		video.crossOrigin = useCredentials ? 'use-credentials' : 'anonymous';
 
 		if (Hls.isSupported()) {
 			const player = new Hls({
 				enableWorker: true,
-				lowLatencyMode: false
+				lowLatencyMode: false,
+				...(useCredentials
+					? {
+							xhrSetup: (xhr: XMLHttpRequest) => {
+								xhr.withCredentials = true;
+							}
+						}
+					: {})
 			});
 			players[index] = player;
 			player.loadSource(url);
@@ -202,7 +210,11 @@
 			// fail fMP4 Kinesis playlists with a non-recovering demux/ORB error.
 			// Safari has no hls.js MSE path and falls through to native HLS.
 			activeVideoIndex = 0;
-			await attachHls(hlsUrl, 0);
+			await attachHls(
+				hlsUrl,
+				0,
+				Boolean(liveVideoUrlTemplate.trim() && !explicitStreamUrl)
+			);
 			if (revision !== connectionRevision) return;
 			connected = true;
 		} catch (err) {
