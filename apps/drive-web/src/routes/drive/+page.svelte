@@ -92,7 +92,7 @@
 	let inputMode = $state<InputMode>('keyboard');
 	let cameraViewRef = $state<CameraViewComponent | null>(null);
 	let driveTunnels = $state<DriveTunnel[]>(DRIVE_TUNNELS);
-	let selectedTunnel = $state<TunnelId>(DRIVE_TUNNELS[0].id);
+	let selectedTunnel = $state<TunnelId>(DRIVE_TUNNELS[0]?.id ?? '');
 	// 'drive' = ego driving UI; 'twin' = digital twin mirror of the real
 	// street cameras (side-by-side CARLA render / real feed).
 	let viewMode = $state<'drive' | 'twin'>('drive');
@@ -192,7 +192,7 @@
 	);
 
 	function getSelectedUrl(): string {
-		return driveTunnels.find(t => t.id === selectedTunnel)?.url ?? driveTunnels[0].url;
+		return driveTunnels.find(t => t.id === selectedTunnel)?.url ?? driveTunnels[0]?.url ?? '';
 	}
 
 	function switchTunnel(id: TunnelId) {
@@ -278,12 +278,13 @@
 		try {
 			const config = await loadRuntimeConfig();
 			driveTunnels = buildDriveTunnels(config);
-			selectedTunnel = driveTunnels[0].id;
+			selectedTunnel = driveTunnels[0]?.id ?? '';
 		} catch {
 			driveTunnels = DRIVE_TUNNELS;
-			selectedTunnel = driveTunnels[0].id;
+			selectedTunnel = driveTunnels[0]?.id ?? '';
 		}
-		connect(getSelectedUrl());
+		const driveUrl = getSelectedUrl();
+		if (driveUrl) connect(driveUrl);
 
 		setOnFrame((blob: Blob) => {
 			if (cameraViewRef) {
