@@ -3,6 +3,7 @@
 	import Hls from 'hls.js';
 	import { fetchVideoSession } from '$lib/api';
 	import { resolveLiveVideoUrl } from '$lib/runtime-config';
+	import { playWithAbortRetry } from '$lib/media-play';
 
 	interface Props {
 		cameraId: string;
@@ -109,11 +110,13 @@
 		}
 
 		// The play promise resolves only once playback has actually begun. This
-		// makes a standby player safe to reveal during a session handoff.
+		// makes a standby player safe to reveal during a session handoff. A
+		// pending play() can be interrupted (AbortError) when four decoders start
+		// at once; that is retried once rather than surfaced as a dead card.
 		let playbackTimeout: ReturnType<typeof setTimeout> | null = null;
 		try {
 			await Promise.race([
-				video.play(),
+				playWithAbortRetry(video),
 				new Promise<never>((_resolve, reject) => {
 					playbackTimeout = setTimeout(
 						() => reject(new Error('Timed out preparing video session')),
