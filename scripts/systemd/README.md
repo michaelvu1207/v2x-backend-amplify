@@ -1,38 +1,39 @@
 # path-rfs systemd units
 
-These tracked definitions supervise the V2X Drive stack from
+These files are the tracked definitions for the production V2X Drive stack in
 `/home/path/v2x-drive`.
 
 | Unit | Role |
 | --- | --- |
-| `v2x-carla-rr.service` | Adopts and supervises the pre-provisioned CARLA 0.10 container `carla-rr-maps` |
-| `v2x-drive.service` | Starts `digital_twin_bridge` after CARLA is ready |
-| `v2x-cloudflared-drive.service` | Publishes the drive WebSocket tunnel |
-| `v2x-drive-link-health.service` / `.timer` | Checks the public drive link every five minutes |
-| `v2x-nightly-drive-restart.service` / `.timer` | Restarts CARLA and the drive server at 04:00 local time (replaces the former hourly unit) |
-| `v2x-web.service` | Optional path-rfs Vite development server from `apps/drive-web` |
+| `v2x-drive.service` | Waits for the existing `carla-rr-maps` container, then runs `digital_twin_bridge` on `:8765` |
+| `v2x-drive-watchdog.service` / `.timer` | Probes CARLA every two minutes and recovers a hung simulator or drive process |
+| `v2x-nightly-restart.service` / `.timer` | Restarts CARLA and the drive service at 04:00 unless a drive session is active |
+| `v2x-firewall.service` | Keeps CARLA, drive, and twin backend ports off the public interface |
+| `v2x-carla-event-logger.service` | Records CARLA container exit and OOM events |
 
-Perception is not part of this unit set. Install it from the separate
-`path2v2x/co-perception` checkout.
+The CARLA 0.10 container is provisioned separately and is not managed by a
+tracked systemd service. Perception is also separate. The production CARLA
+Python environment intentionally remains at
+`/home/path/V2XCarla/carla-venv-310`; moving the repository does not move or
+rebuild that environment.
 
 ## Install
 
+Run as root:
+
 ```bash
 cd /home/path/v2x-drive
-sudo install -m 0644 scripts/systemd/*.service scripts/systemd/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now \
-  v2x-carla-rr.service \
+install -m 0644 scripts/systemd/* /etc/systemd/system/
+chmod +x scripts/ops/*.sh
+systemctl daemon-reload
+systemctl enable --now \
   v2x-drive.service \
-  v2x-cloudflared-drive.service \
-  v2x-drive-link-health.timer \
-  v2x-nightly-drive-restart.timer
+  v2x-drive-watchdog.timer \
+  v2x-nightly-restart.timer \
+  v2x-firewall.service \
+  v2x-carla-event-logger.service
 ```
 
-The units use absolute repository paths. Reinstall every unit listed in
-[`../../docs/deploy-path-rfs.md`](../../docs/deploy-path-rfs.md) if the checkout
-moves.
-
-The simulator container must already exist unless an operator explicitly enables
-the guarded create/recreate flags in `scripts/restart-drive-stack.sh`. Keep live
-credentials and environment overrides under `/etc`; do not add them to this tree.
+The units and operations scripts use absolute paths under
+`/home/path/v2x-drive`. Reinstall them after changing the checkout location.
+Live credentials and environment overrides belong outside the repository.

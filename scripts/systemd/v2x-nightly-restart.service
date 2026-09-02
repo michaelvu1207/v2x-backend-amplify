@@ -1,0 +1,7 @@
+[Unit]
+Description=Nightly preventive restart of V2X drive stack
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/path/v2x-drive/scripts/ops/v2x-nightly-restart.sh

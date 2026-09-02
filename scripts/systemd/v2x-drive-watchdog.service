@@ -1,0 +1,7 @@
+[Unit]
+Description=V2X drive stack watchdog (recover from CARLA crash/hang)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/path/v2x-drive/scripts/ops/v2x-drive-watchdog.sh

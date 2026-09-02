@@ -39,7 +39,6 @@ frontend:
             stateBaseUrl: env.STATE_BASE_URL || apiBaseUrl,
             statePath: env.STATE_PATH || '/state',
             mapDataPath: env.MAP_DATA_PATH || '/map-data',
-            driveConfigPath: env.DRIVE_CONFIG_PATH || '/drive-config',
             demoVideosPath: env.DEMO_VIDEOS_PATH || '/demo-videos',
             videoCameraIds: parseJsonEnv(
               'VIDEO_CAMERA_IDS',
@@ -55,7 +54,7 @@ frontend:
             perceptionStreamBaseUrl: env.PERCEPTION_STREAM_BASE_URL || '',
             perceptionStreamPathTemplate: env.PERCEPTION_STREAM_PATH_TEMPLATE || '/streams/{camera_id}.mjpg',
             cloudflareDriveWsUrl: env.VITE_CLOUDFLARE_DRIVE_WS_URL || '',
-            tailscaleDriveWsUrl: env.VITE_TAILSCALE_DRIVE_WS_URL || 'wss://path-b860i-aorus-pro-ice.tail1cad6a.ts.net'
+            tailscaleDriveWsUrl: env.VITE_TAILSCALE_DRIVE_WS_URL || ''
           };
 
           fs.writeFileSync('build/config.json', `${JSON.stringify(config, null, 2)}\n`);

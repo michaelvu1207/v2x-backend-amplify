@@ -53,7 +53,6 @@ ROUTE_KEYS=(
   "GET /demo-videos"
   "GET /state"
   "GET /map-data"
-  "GET /drive-config"
   "GET /snapshots/{object_id}/latest"
   "GET /video/session/{camera_id}"
   "GET /video/browser-session/{camera_id}"

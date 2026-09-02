@@ -169,11 +169,10 @@ Optional env vars for `provision-read-api.sh` include:
 - `EXPECTED_CURRENT_STATE_HASH` (required for apply; copied from the reviewed plan)
 - `PLAN_ONLY` (defaults to `true`; apply requires an explicit `false`)
 
-Tracked read routes include `/drive-config`, `/detections/timeline`,
-`/video/coverage/{camera_id}`, and the opaque
-`/video/proxy/{token}/{resource_id}` route in addition to the state, snapshot,
-detection, demo-video, and HLS-session routes. After applying, capture
-route-to-integration parity with:
+Tracked read routes include `/detections/timeline`, `/video/coverage/{camera_id}`,
+and the opaque `/video/proxy/{token}/{resource_id}` route in addition to the
+state, snapshot, detection, demo-video, and HLS-session routes. After applying,
+capture route-to-integration parity with:
 
 ```bash
 api_id="$(aws apigatewayv2 get-apis \

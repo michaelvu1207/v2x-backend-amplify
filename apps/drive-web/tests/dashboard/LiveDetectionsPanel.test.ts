@@ -30,7 +30,6 @@ const config: RuntimeConfig = {
 	stateBaseUrl: 'https://api.example.test',
 	statePath: '/state',
 	mapDataPath: '/map-data',
-	driveConfigPath: '/drive-config',
 	demoVideosPath: '/demo-videos',
 	videoCameraIds: ['ch1'],
 	perceptionStreamUrls: {},

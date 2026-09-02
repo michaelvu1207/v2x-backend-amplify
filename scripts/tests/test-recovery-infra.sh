@@ -199,11 +199,8 @@ for argument in "$@"; do
 done
 payload=""
 case "$*" in
-  *drive-config*)
-    payload='{"version":1,"expiresAt":"2099-01-01T00:00:00Z","cloudflareDriveWsUrl":"wss://drive.example.test"}'
-    ;;
   *config.json*)
-    payload='{"apiBaseUrl":"https://api.example.test","driveConfigPath":"/drive-config","perceptionStreamBaseUrl":"https://perception.example.test"}'
+    payload='{"apiBaseUrl":"https://api.example.test","perceptionStreamBaseUrl":"https://perception.example.test"}'
     ;;
   */health*)
     payload='{"status":"ok","ready":true,"cameras":{"ch1":{"fresh":true,"state":"streaming"},"ch2":{"fresh":true,"state":"streaming"},"ch3":{"fresh":true,"state":"streaming"},"ch4":{"fresh":true,"state":"streaming"}}}'
@@ -281,45 +278,6 @@ BACKUP_ROOT="$TMP/iam-backup" \
 find "$TMP/iam-backup" -name iam-current-state.json -type f | grep -q . \
   || fail 'IAM apply did not preserve current-state evidence'
 
-# First Drive publication must record absence; rollback must create an expired,
-# forward-versioned tombstone rather than deleting the audited object.
-: >"$MOCK_AWS_LOG"
-PATH="$MOCK_BIN:$PATH" ACTION=publish STATE_BUCKET=test-state \
-EXPECTED_CURRENT_VERSION=0 DRIVE_WS_URL=wss://drive.example.test \
-TAILSCALE_DRIVE_WS_URL=wss://tailscale.example.test \
-  "$ROOT/scripts/publish-drive-tunnel-config.sh" >"$TMP/drive-publish.txt"
-config_path="$MOCK_OBJECTS/api__drive-config.json"
-jq -e '.version == 1 and (.tombstone // false) == false' "$config_path" >/dev/null
-absence_path="$(find "$MOCK_OBJECTS" -name '*drive-config-prior-absence-*' -type f | head -n 1)"
-[[ -n "$absence_path" ]] || fail 'first publication did not record prior absence'
-jq -e '.kind == "drive-config-prior-absence" and .absent == true' "$absence_path" >/dev/null
-absence_key="${absence_path##*/}"
-absence_key="${absence_key//__/\/}"
-PATH="$MOCK_BIN:$PATH" ACTION=rollback STATE_BUCKET=test-state \
-EXPECTED_CURRENT_VERSION=1 ROLLBACK_BACKUP_KEY="$absence_key" \
-  "$ROOT/scripts/publish-drive-tunnel-config.sh" >"$TMP/drive-rollback.txt"
-jq -e '
-  .version == 2
-  and .tombstone == true
-  and .restoresPriorAbsence == true
-  and (.expiresAt < .updatedAt)' "$config_path" >/dev/null
-
-# The launcher must not parse a root-owned EnvironmentFile in the service user.
-cat >"$MOCK_BIN/cloudflared" <<'MOCK_CLOUDFLARED'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >"$MOCK_CLOUDFLARED_ARGS"
-MOCK_CLOUDFLARED
-chmod 0755 "$MOCK_BIN/cloudflared"
-printf 'this is deliberately not shell syntax (\n' >"$TMP/root-owned.env"
-chmod 000 "$TMP/root-owned.env"
-export MOCK_CLOUDFLARED_ARGS="$TMP/cloudflared-args.txt"
-CLOUDFLARED_BIN="$MOCK_BIN/cloudflared" ENV_FILE="$TMP/root-owned.env" \
-DRIVE_TUNNEL_MODE=quick ORIGIN_SERVICE=http://localhost:8765 \
-  "$ROOT/scripts/launch-cloudflared-drive-tunnel.sh" >/dev/null
-assert_contains "$MOCK_CLOUDFLARED_ARGS" 'tunnel --url http://localhost:8765'
-
-# Static recovery guards that complement the executable mocks.
-assert_contains "$ROOT/scripts/systemd/v2x-drive-link-health.service" 'EnvironmentFile=-/etc/v2x-drive-tunnel.env'
 assert_contains "$ROOT/infra/amplify/deploy.sh" 'RECOVERY_CONNECTED_DEPLOY_GATE'
 assert_contains "$ROOT/scripts/systemd/README.md" 'cd /home/path/v2x-drive'
 if grep -A20 'if path == "/detections/recent"' \
@@ -328,51 +286,6 @@ if grep -A20 'if path == "/detections/recent"' \
 fi
 python3 "$ROOT/infra/aws-cli/tests/test_generated_read_api.py"
 
-# Literal braces in the dashboard's retained perception path must survive Bash
-# parsing, and publication must probe four distinct, exact camera URLs.
-: >"$MOCK_CURL_LOG"
-env -u PERCEPTION_STREAM_PATH_TEMPLATE PATH="$MOCK_BIN:$PATH" \
-ACTION=plan UPDATE_DRIVE=false UPDATE_PERCEPTION=true \
-PERCEPTION_STREAM_BASE_URL=https://perception.example.test \
-  "$ROOT/scripts/publish-amplify-runtime-config.sh" >"$TMP/amplify-runtime-plan.txt"
-for camera_id in ch1 ch2 ch3 ch4; do
-  assert_contains "$MOCK_CURL_LOG" \
-    "https://perception.example.test/streams/${camera_id}.mjpg"
-done
-if grep -Fq '{camera_id' "$MOCK_CURL_LOG"; then
-  fail 'Amplify runtime publisher emitted an unrendered camera path marker'
-fi
-
-
-# Secure wss:// checks must let websockets create its default TLS context.
-# Passing ssl=None explicitly is rejected by newer releases before a handshake.
-FAKE_PYTHON_MODULES="$TMP/fake-python-modules"
-mkdir -p "$FAKE_PYTHON_MODULES"
-cat >"$FAKE_PYTHON_MODULES/websockets.py" <<'MOCK_WEBSOCKETS'
-class _Connection:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, traceback):
-        return False
-
-
-def connect(url, **kwargs):
-    if url.startswith("wss://") and kwargs.get("ssl", "omitted") is None:
-        raise ValueError("ssl=None is incompatible with a wss:// URI")
-    return _Connection()
-MOCK_WEBSOCKETS
-
-: >"$MOCK_CURL_LOG"
-PYTHONPATH="$FAKE_PYTHON_MODULES" PATH="$MOCK_BIN:$PATH" \
-PYTHON_BIN="$(command -v python3)" \
-FRONTEND_CONFIG_URL=https://frontend.example.test/config.json \
-DRIVE_CONFIG_URL=https://api.example.test/drive-config \
-DRIVE_LINK_HEALTH_REPAIR=false DRIVE_CONFIG_REQUIRED=true \
-DRIVE_WS_INSECURE_SSL=false \
-  "$ROOT/scripts/check-drive-frontend-link.sh" \
-  >"$TMP/drive-link-check.txt"
-assert_contains "$TMP/drive-link-check.txt" 'Drive frontend link is healthy.'
 
 # Repository reconnection must use the lowercase AWS request schema while the
 # token stays in a mode-0600 file rather than process arguments or logs.

@@ -1,0 +1,13 @@
+[Unit]
+Description=Log CARLA container crash events with exit codes and log tails
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/home/path/v2x-drive/scripts/ops/v2x-carla-event-logger.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

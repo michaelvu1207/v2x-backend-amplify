@@ -1,0 +1,12 @@
+[Unit]
+Description=Block internet access to CARLA, drive, and twin backend ports
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/path/v2x-drive/scripts/ops/v2x-firewall.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -535,11 +535,6 @@ def _get_map_data():
         return error
     return _resp(200, payload)
 
-def _get_drive_config():
-    payload, error = _get_s3_json("api/drive-config.json")
-    if error:
-        return error
-    return _resp(200, payload)
 
 def _get_snapshot(object_id):
     key = f"snapshots/{object_id}/latest.jpg"
@@ -1230,8 +1225,6 @@ def handler(event, context):
     if path == "/map-data":
         return _get_map_data()
 
-    if path == "/drive-config":
-        return _get_drive_config()
 
     if path.startswith("/snapshots/") and path.endswith("/latest"):
         object_id = path_params.get("object_id") or path.split("/snapshots/", 1)[1].rsplit("/latest", 1)[0]
@@ -1291,7 +1284,6 @@ def handler(event, context):
                     "/demo-videos",
                     "/state",
                     "/map-data",
-                    "/drive-config",
                     "/snapshots/{object_id}/latest",
                     "/detections/range",
                     "/detections/recent",

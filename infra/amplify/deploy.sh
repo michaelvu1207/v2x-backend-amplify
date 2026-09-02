@@ -25,7 +25,6 @@ STATE_BASE_URL="${STATE_BASE_URL:-}"
 STATE_BUCKET="${STATE_BUCKET:-}"
 STATE_PATH="${STATE_PATH:-/state}"
 MAP_DATA_PATH="${MAP_DATA_PATH:-/map-data}"
-DRIVE_CONFIG_PATH="${DRIVE_CONFIG_PATH:-/drive-config}"
 VIDEO_CAMERA_IDS="${VIDEO_CAMERA_IDS:-[\"ch1\",\"ch2\",\"ch3\",\"ch4\"]}"
 PERCEPTION_STREAM_URLS_EXPLICIT="${PERCEPTION_STREAM_URLS+x}"
 PERCEPTION_STREAM_BASE_URL_EXPLICIT="${PERCEPTION_STREAM_BASE_URL+x}"
@@ -38,7 +37,7 @@ if [[ -z "${PERCEPTION_STREAM_PATH_TEMPLATE}" ]]; then
 fi
 DEMO_VIDEOS_PATH="${DEMO_VIDEOS_PATH:-/demo-videos}"
 CLOUDFLARE_DRIVE_WS_URL="${CLOUDFLARE_DRIVE_WS_URL:-${VITE_CLOUDFLARE_DRIVE_WS_URL:-${VITE_DRIVE_WS_URL:-}}}"
-TAILSCALE_DRIVE_WS_URL="${TAILSCALE_DRIVE_WS_URL:-${VITE_TAILSCALE_DRIVE_WS_URL:-wss://path-b860i-aorus-pro-ice.tail1cad6a.ts.net}}"
+TAILSCALE_DRIVE_WS_URL="${TAILSCALE_DRIVE_WS_URL:-${VITE_TAILSCALE_DRIVE_WS_URL:-}}"
 STOP_IN_PROGRESS_JOBS="${STOP_IN_PROGRESS_JOBS:-false}"
 RECOVERY_CONNECTED_DEPLOY_GATE="${RECOVERY_CONNECTED_DEPLOY_GATE:-}"
 EXPECTED_CANONICAL_REPOSITORY="${EXPECTED_CANONICAL_REPOSITORY:-https://github.com/michaelvu1207/v2x-drive-amplify}"
@@ -92,7 +91,6 @@ jq -n \
   --arg stateBaseUrl "${STATE_BASE_URL}" \
   --arg statePath "${STATE_PATH}" \
   --arg mapDataPath "${MAP_DATA_PATH}" \
-  --arg driveConfigPath "${DRIVE_CONFIG_PATH}" \
   --arg demoVideosPath "${DEMO_VIDEOS_PATH}" \
   --argjson videoCameraIds "${VIDEO_CAMERA_IDS}" \
   --argjson perceptionStreamUrls "${PERCEPTION_STREAM_URLS}" \
@@ -111,7 +109,6 @@ jq -n \
     $stateBaseUrl,
     $statePath,
     $mapDataPath,
-    $driveConfigPath,
     $demoVideosPath,
     $videoCameraIds,
     $perceptionStreamUrls,
@@ -147,7 +144,6 @@ jq -n \
   --arg STATE_BASE_URL "${STATE_BASE_URL}" \
   --arg STATE_PATH "${STATE_PATH}" \
   --arg MAP_DATA_PATH "${MAP_DATA_PATH}" \
-  --arg DRIVE_CONFIG_PATH "${DRIVE_CONFIG_PATH}" \
   --arg DEMO_VIDEOS_PATH "${DEMO_VIDEOS_PATH}" \
   --arg VIDEO_CAMERA_IDS "${VIDEO_CAMERA_IDS}" \
   --arg PERCEPTION_STREAM_URLS "${PERCEPTION_STREAM_URLS}" \
@@ -164,7 +160,6 @@ jq -n \
     STATE_BASE_URL: $STATE_BASE_URL,
     STATE_PATH: $STATE_PATH,
     MAP_DATA_PATH: $MAP_DATA_PATH,
-    DRIVE_CONFIG_PATH: $DRIVE_CONFIG_PATH,
     DEMO_VIDEOS_PATH: $DEMO_VIDEOS_PATH,
     VIDEO_CAMERA_IDS: $VIDEO_CAMERA_IDS,
     PERCEPTION_STREAM_PATH_TEMPLATE: $PERCEPTION_STREAM_PATH_TEMPLATE,
@@ -198,7 +193,7 @@ if [[ -n "${APP_REPOSITORY}" && "${APP_REPOSITORY}" != "None" ]]; then
   branch_env_hash="$(jq -Sc . "${CURRENT_ENV_JSON}" | sha256sum | awk '{print $1}')"
   if [[ "${RECOVERY_CONNECTED_DEPLOY_GATE}" != "canonical-reviewed-release" ]]; then
     echo "Connected-repository recovery deploy is disabled by default." >&2
-    echo "Use reconcile-repository.sh and publish-amplify-runtime-config.sh instead." >&2
+    echo "Use reconcile-repository.sh and update the branch environment variables instead." >&2
     echo "A reviewed exception requires RECOVERY_CONNECTED_DEPLOY_GATE=canonical-reviewed-release." >&2
     exit 8
   fi
