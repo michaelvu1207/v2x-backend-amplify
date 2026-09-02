@@ -59,20 +59,28 @@
 <header class="flex h-14 shrink-0 items-center justify-between border-b border-gray-800 bg-gray-950/80 px-4 backdrop-blur-sm">
 	<!-- Left: title -->
 	<div class="flex items-center gap-5">
-		<div class="flex items-center gap-3">
+		<a href="/" class="flex items-center gap-3" aria-label="V2X Drive home">
 			<img src="/logo.png" alt="V2X logo" class="h-8" />
 			<div>
 				<h1 class="text-sm font-semibold text-white">V2X Drive</h1>
 				<p class="text-[10px] text-gray-500">Richmond Field Station dashboard</p>
 			</div>
-		</div>
+		</a>
 
 	<nav class="hidden items-center gap-2 md:flex">
 		<a
-			href="/drive?view=twin"
+			href="/drive"
 			class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/drive')}`}
 			>
-				Digital Twin View
+				Drive
+			</a>
+			<a
+				href="https://twin.path2v2x.net/"
+				target="_blank"
+				rel="noreferrer"
+				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/twin')}`}
+			>
+				Digital Twin &#8599;
 			</a>
 			<a
 				href="/live"
@@ -104,10 +112,18 @@
 	<div class="flex items-center gap-5">
 		<nav class="flex items-center gap-2 md:hidden">
 			<a
-				href="/drive?view=twin"
+				href="/drive"
 				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/drive')}`}
 			>
-				Digital Twin
+				Drive
+			</a>
+			<a
+				href="https://twin.path2v2x.net/"
+				target="_blank"
+				rel="noreferrer"
+				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/twin')}`}
+			>
+				Digital Twin &#8599;
 			</a>
 			<a
 				href="/live"
