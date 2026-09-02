@@ -529,9 +529,13 @@
 {/if}
 
 <div class="h-screen w-screen bg-black relative overflow-hidden">
+	<!-- Lobby: top-left corner (nothing else lives there). Driving HUD: the
+	     top-left is the map toggle, so the link moves to the top-center pill. -->
 	<a
 		href="/"
-		class="absolute top-3 left-1/2 z-[70] -translate-x-1/2 rounded-full border border-gray-700/70 bg-gray-900/90 px-4 py-1.5 text-[11px] font-semibold tracking-[0.16em] text-gray-300 uppercase backdrop-blur transition hover:text-white"
+		class={`absolute z-[70] rounded-full border border-gray-700/70 bg-gray-900/90 px-4 py-1.5 text-[11px] font-semibold tracking-[0.16em] text-gray-300 uppercase backdrop-blur transition hover:text-white ${
+			driveState === 'idle' || driveState === 'connecting' ? 'top-4 left-4' : 'top-3 left-1/2 -translate-x-1/2'
+		}`}
 	>
 		&larr; Home
 	</a>
