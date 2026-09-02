@@ -1,5 +1,6 @@
 numpy
 Pillow
+opencv-python-headless
 requests
 boto3
 websockets
