@@ -13,6 +13,7 @@ export interface RuntimeConfig {
 	mapDataPath: string;
 	demoVideosPath: string;
 	videoCameraIds: string[];
+	liveVideoUrlTemplate: string;
 	perceptionStreamUrls: Record<string, string>;
 	perceptionStreamBaseUrl: string;
 	perceptionStreamPathTemplate: string;
@@ -33,6 +34,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
 	mapDataPath: '/map-data',
 	demoVideosPath: '/demo-videos',
 	videoCameraIds: ['ch1', 'ch2', 'ch3', 'ch4'],
+	liveVideoUrlTemplate: '',
 	perceptionStreamUrls: {},
 	perceptionStreamBaseUrl: '',
 	perceptionStreamPathTemplate: '/streams/{camera_id}.mjpg',
@@ -82,6 +84,7 @@ function normalizeConfig(config: Partial<RuntimeConfig>): RuntimeConfig {
 		mapDataPath: withDefaultPath(config.mapDataPath, DEFAULT_CONFIG.mapDataPath),
 		demoVideosPath: withDefaultPath(config.demoVideosPath, DEFAULT_CONFIG.demoVideosPath),
 		videoCameraIds: config.videoCameraIds || DEFAULT_CONFIG.videoCameraIds,
+		liveVideoUrlTemplate: config.liveVideoUrlTemplate || DEFAULT_CONFIG.liveVideoUrlTemplate,
 		perceptionStreamUrls: config.perceptionStreamUrls || DEFAULT_CONFIG.perceptionStreamUrls,
 		perceptionStreamBaseUrl: (config.perceptionStreamBaseUrl || DEFAULT_CONFIG.perceptionStreamBaseUrl).replace(/\/+$/, ''),
 		perceptionStreamPathTemplate:
@@ -131,6 +134,10 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
 /** Clear the memoized config so an explicit refresh can reload config.json. */
 export function resetRuntimeConfigCache(): void {
 	configPromise = null;
+}
+
+export function resolveLiveVideoUrl(template: string, cameraId: string): string {
+	return template.trim().replace('{camera_id}', encodeURIComponent(cameraId));
 }
 
 export function buildAssetUrl(baseUrl: string, path: string): string {

@@ -46,11 +46,15 @@ camera feeds. The producer's public stream is
 `wss://<host>/perception/ws`. Each binary WebSocket message is one JPEG frame
 prefixed by a single channel byte. nginx routes `/perception/ws` to
 `127.0.0.1:8766` on path-rfs. Deployment configuration must point the dashboard's
-perception stream settings at endpoints produced by `co-perception`; raw Kinesis
-HLS remains the dashboard fallback when no annotated stream is configured.
+perception stream settings at endpoints produced by `co-perception`.
 
-The live AWS camera stream names remain `v2x-backend-cam-ch1` through
-`v2x-backend-cam-ch4`.
+Raw live video is served locally on path-rfs by the copy-only MediaMTX relay in
+`scripts/ops/camera-relay`: public paths `ch1` through `ch4` are available as
+low-latency HLS under `https://drive.path2v2x.net/camera/`. Set the dashboard
+runtime key `liveVideoUrlTemplate` to
+`https://drive.path2v2x.net/camera/{camera_id}/index.m3u8` to use it directly.
+An empty template preserves the existing Kinesis browser-session fallback, and
+the existing AWS Kinesis upload continues unchanged during the soak period.
 
 ## Local development
 

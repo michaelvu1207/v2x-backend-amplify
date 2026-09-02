@@ -2,14 +2,21 @@
 	import { onDestroy, tick } from 'svelte';
 	import Hls from 'hls.js';
 	import { fetchVideoSession } from '$lib/api';
+	import { resolveLiveVideoUrl } from '$lib/runtime-config';
 
 	interface Props {
 		cameraId: string;
 		streamUrl?: string;
+		liveVideoUrlTemplate?: string;
 		sourceLabel?: string;
 	}
 
-	let { cameraId, streamUrl = '', sourceLabel = 'Raw' }: Props = $props();
+	let {
+		cameraId,
+		streamUrl = '',
+		liveVideoUrlTemplate = '',
+		sourceLabel = 'Raw'
+	}: Props = $props();
 
 	let videoElA = $state<HTMLVideoElement | null>(null);
 	let videoElB = $state<HTMLVideoElement | null>(null);
@@ -168,7 +175,9 @@
 		if (revision !== connectionRevision) return;
 
 		try {
-			const sourceUrl = streamUrl.trim();
+			const explicitStreamUrl = streamUrl.trim();
+			const sourceUrl =
+				explicitStreamUrl || resolveLiveVideoUrl(liveVideoUrlTemplate, cameraId);
 			let hlsUrl = sourceUrl;
 			if (sourceUrl) {
 				sessionExpiresIn = null;
@@ -206,7 +215,7 @@
 	}
 
 	$effect(() => {
-		const key = `${cameraId}|${streamUrl}`;
+		const key = `${cameraId}|${streamUrl}|${liveVideoUrlTemplate}`;
 		if (key === connectionKey) return;
 		connectionKey = key;
 		void connect();

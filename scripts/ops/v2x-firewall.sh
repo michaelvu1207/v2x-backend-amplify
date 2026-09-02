@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Block internet access to the CARLA RPC/stream ports (2000-2002, Docker-published,
-# enforced in DOCKER-USER) and the host drive/twin ports (8765, 8190, 8865,
-# enforced in INPUT). Loopback and established connections are unaffected;
+# enforced in DOCKER-USER) and the host drive, twin, and loopback-only camera
+# relay ports (8765, 8190, 8865, 8554, 8888, enforced in INPUT).
 # SSH (22) and nginx (443) stay open.
 set -u
 
@@ -11,8 +11,8 @@ if [ -n "$EXT4" ]; then
         iptables -I DOCKER-USER -i "$EXT4" -p tcp --dport 2000:2002 -m conntrack --ctstate NEW -j DROP
     iptables -C INPUT -i "$EXT4" -p tcp --dport 8765 -m conntrack --ctstate NEW -j DROP 2>/dev/null || \
         iptables -I INPUT -i "$EXT4" -p tcp --dport 8765 -m conntrack --ctstate NEW -j DROP
-    iptables -C INPUT -i "$EXT4" -p tcp -m multiport --dports 8190,8865 -m conntrack --ctstate NEW -j DROP 2>/dev/null || \
-        iptables -I INPUT -i "$EXT4" -p tcp -m multiport --dports 8190,8865 -m conntrack --ctstate NEW -j DROP
+    iptables -C INPUT -i "$EXT4" -p tcp -m multiport --dports 8190,8554,8865,8888 -m conntrack --ctstate NEW -j DROP 2>/dev/null || \
+        iptables -I INPUT -i "$EXT4" -p tcp -m multiport --dports 8190,8554,8865,8888 -m conntrack --ctstate NEW -j DROP
     echo "v2x-firewall: IPv4 rules active on $EXT4"
 fi
 
@@ -24,7 +24,7 @@ if [ -n "$EXT6" ]; then
     fi
     ip6tables -C INPUT -i "$EXT6" -p tcp --dport 8765 -m conntrack --ctstate NEW -j DROP 2>/dev/null || \
         ip6tables -I INPUT -i "$EXT6" -p tcp --dport 8765 -m conntrack --ctstate NEW -j DROP
-    ip6tables -C INPUT -i "$EXT6" -p tcp -m multiport --dports 8190,8865 -m conntrack --ctstate NEW -j DROP 2>/dev/null || \
-        ip6tables -I INPUT -i "$EXT6" -p tcp -m multiport --dports 8190,8865 -m conntrack --ctstate NEW -j DROP
+    ip6tables -C INPUT -i "$EXT6" -p tcp -m multiport --dports 8190,8554,8865,8888 -m conntrack --ctstate NEW -j DROP 2>/dev/null || \
+        ip6tables -I INPUT -i "$EXT6" -p tcp -m multiport --dports 8190,8554,8865,8888 -m conntrack --ctstate NEW -j DROP
     echo "v2x-firewall: IPv6 rules active on $EXT6"
 fi

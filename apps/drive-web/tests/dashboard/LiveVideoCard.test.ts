@@ -117,6 +117,23 @@ describe('LiveVideoCard camera selection', () => {
 		expect(hlsMocks.attachMedia).toHaveBeenCalledWith(expect.any(HTMLVideoElement));
 	});
 
+	it('resolves a configured live URL and skips the Kinesis session API', async () => {
+		render(LiveVideoCard, {
+			props: {
+				cameraId: 'ch 2',
+				liveVideoUrlTemplate:
+					'https://drive.example.test/camera/{camera_id}/index.m3u8'
+			}
+		});
+
+		await waitFor(() =>
+			expect(hlsMocks.loadSource).toHaveBeenCalledWith(
+				'https://drive.example.test/camera/ch%202/index.m3u8'
+			)
+		);
+		expect(apiMocks.fetchVideoSession).not.toHaveBeenCalled();
+	});
+
 	it('keeps the active stream alive until a renewed session is already playing', async () => {
 		vi.useFakeTimers();
 		apiMocks.fetchVideoSession

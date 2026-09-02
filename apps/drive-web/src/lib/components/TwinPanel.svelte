@@ -257,6 +257,7 @@
 		<LiveVideoCard
 			{cameraId}
 			streamUrl={perceptionStreamUrl(cameraId)}
+			liveVideoUrlTemplate={config?.liveVideoUrlTemplate || ''}
 			sourceLabel={perceptionStreamUrl(cameraId) ? 'Perception' : 'Raw'}
 		/>
 	{/if}

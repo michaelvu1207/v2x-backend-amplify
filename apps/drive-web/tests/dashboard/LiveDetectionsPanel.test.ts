@@ -32,6 +32,7 @@ const config: RuntimeConfig = {
 	mapDataPath: '/map-data',
 	demoVideosPath: '/demo-videos',
 	videoCameraIds: ['ch1'],
+	liveVideoUrlTemplate: '',
 	perceptionStreamUrls: {},
 	perceptionStreamBaseUrl: 'https://perception.example.test',
 	perceptionStreamPathTemplate: '/streams/{camera_id}.mjpg',

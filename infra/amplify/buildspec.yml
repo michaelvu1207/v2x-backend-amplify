@@ -45,6 +45,7 @@ frontend:
               '["ch1","ch2","ch3","ch4"]',
               (value) => Array.isArray(value) && value.every((item) => typeof item === 'string')
             ),
+            liveVideoUrlTemplate: env.LIVE_VIDEO_URL_TEMPLATE || '',
             perceptionStreamUrls: parseJsonEnv(
               'PERCEPTION_STREAM_URLS',
               '{}',

@@ -1,0 +1,32 @@
+logLevel: info
+
+api: no
+
+rtsp: yes
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+
+rtmp: no
+
+hls: yes
+hlsAddress: 127.0.0.1:8888
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 5
+
+webrtc: no
+srt: no
+
+pathDefaults:
+  source: publisher
+  record: yes
+  recordPath: /var/lib/v2x-camera/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordSegmentDuration: 15m
+  recordDeleteAfter: 168h
+
+paths:
+  ch1: {}
+  ch2: {}
+  ch3: {}
+  ch4: {}

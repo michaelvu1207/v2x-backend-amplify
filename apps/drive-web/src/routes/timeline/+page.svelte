@@ -217,7 +217,10 @@
 							onTimeUpdate={handlePrimaryTime}
 						/>
 					{:else}
-						<LiveVideoCard {cameraId} />
+						<LiveVideoCard
+							{cameraId}
+							liveVideoUrlTemplate={runtimeConfig?.liveVideoUrlTemplate || ''}
+						/>
 					{/if}
 				</div>
 			{/each}
