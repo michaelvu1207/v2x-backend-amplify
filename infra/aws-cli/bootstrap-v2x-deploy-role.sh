@@ -16,7 +16,7 @@ API_ID="${API_ID:-w0j9m7dgpg}"
 READ_LAMBDA_NAME="${READ_LAMBDA_NAME:-v2x-backend-read}"
 CONFIRM_DELETE="${CONFIRM_DELETE:-}"
 EXPECTED_CURRENT_STATE_HASH="${EXPECTED_CURRENT_STATE_HASH:-}"
-BACKUP_ROOT="${BACKUP_ROOT:-/home/path/V2XCarla/v2x-backend-backups/iam-bootstrap}"
+BACKUP_ROOT="${BACKUP_ROOT:-/home/path/v2x-drive-backups/iam-bootstrap}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRUST_POLICY_FILE="${TRUST_POLICY_FILE:-${HERE}/iam/v2x-deploy-role-trust.json}"

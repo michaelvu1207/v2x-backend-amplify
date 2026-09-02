@@ -7,7 +7,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CARLA_CONTAINER="${CARLA_CONTAINER:-carla-rr-maps}"
-CARLA_IMAGE="${CARLA_IMAGE:-ghcr.io/simforgeinc/carla-rr-maps:0.10.0}"
+CARLA_IMAGE="${CARLA_IMAGE:-}"
 CARLA_COMMAND="${CARLA_COMMAND:-./CarlaUnreal.sh -RenderOffScreen -vulkan -nosound -carla-rpc-port=2000}"
 CARLA_SERVICE="${CARLA_SERVICE:-v2x-carla-rr.service}"
 DRIVE_SERVICE="${DRIVE_SERVICE:-v2x-drive.service}"
@@ -47,6 +47,10 @@ if ! command -v systemctl >/dev/null 2>&1; then
 fi
 
 create_carla_container() {
+    if [[ -z "$CARLA_IMAGE" ]]; then
+        log "ERROR: CARLA_IMAGE must be set when creating a container."
+        exit 1
+    fi
     local -a command_parts=()
     read -r -a command_parts <<<"$CARLA_COMMAND"
     if (( ${#command_parts[@]} == 0 )); then
@@ -63,7 +67,7 @@ create_carla_container() {
         --publish 2002:2002 \
         --env NVIDIA_VISIBLE_DEVICES=all \
         --env NVIDIA_DRIVER_CAPABILITIES=all \
-        --label com.simforge.v2x.managed-by=v2x-backend \
+        --label com.path2v2x.v2x.managed-by=v2x-drive \
         "$CARLA_IMAGE" \
         "${command_parts[@]}" >/dev/null
 }
@@ -118,7 +122,9 @@ image_mismatch=false
 if docker inspect "$CARLA_CONTAINER" >/dev/null 2>&1; then
     container_exists=true
     current_image="$(docker inspect -f '{{.Config.Image}}' "$CARLA_CONTAINER")"
-    if [[ "$current_image" != "$CARLA_IMAGE" ]]; then
+    if [[ -z "$CARLA_IMAGE" ]]; then
+        CARLA_IMAGE="$current_image"
+    elif [[ "$current_image" != "$CARLA_IMAGE" ]]; then
         image_mismatch=true
     fi
 fi

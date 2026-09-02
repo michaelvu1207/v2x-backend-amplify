@@ -10,14 +10,14 @@ ACTION="${ACTION:-plan}"
 AWS_REGION="${AWS_REGION:-us-west-2}"
 AMPLIFY_APP_ID="${AMPLIFY_APP_ID:-d1ugco1rmb7yjj}"
 AMPLIFY_BRANCH="${AMPLIFY_BRANCH:-main}"
-EXPECTED_CURRENT_REPOSITORY="${EXPECTED_CURRENT_REPOSITORY:-https://github.com/michaelvu1207/v2x-backend}"
-CANONICAL_REPOSITORY="${CANONICAL_REPOSITORY:-https://github.com/path2v2x/v2x-backend}"
+EXPECTED_CURRENT_REPOSITORY="${EXPECTED_CURRENT_REPOSITORY:-https://github.com/michaelvu1207/v2x-drive-amplify}"
+CANONICAL_REPOSITORY="${CANONICAL_REPOSITORY:-https://github.com/michaelvu1207/v2x-drive-amplify}"
 ROLLBACK_METADATA_FILE="${ROLLBACK_METADATA_FILE:-}"
 TOKEN_FROM_STDIN="${TOKEN_FROM_STDIN:-false}"
 START_RELEASE="${START_RELEASE:-false}"
 WAIT_FOR_RELEASE="${WAIT_FOR_RELEASE:-true}"
 EXPECTED_CURRENT_HASH="${EXPECTED_CURRENT_HASH:-}"
-BACKUP_DIR="${BACKUP_DIR:-/home/path/V2XCarla/v2x-backend-backups/amplify-repository}"
+BACKUP_DIR="${BACKUP_DIR:-/home/path/v2x-drive-backups/amplify-repository}"
 
 case "$ACTION" in
   plan|apply|rollback) ;;

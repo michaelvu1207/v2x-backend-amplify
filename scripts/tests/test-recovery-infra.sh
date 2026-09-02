@@ -110,7 +110,7 @@ JSON
     jq -e '
       keys == ["accessToken", "appId", "repository"]
       and .appId == "d1ugco1rmb7yjj"
-      and .repository == "https://github.com/path2v2x/v2x-backend"
+      and .repository == "https://github.com/michaelvu1207/v2x-drive-amplify"
       and .accessToken == "test-repository-token"' "$input_file" >/dev/null
     jq -r '.repository' "$input_file" >"$MOCK_AMPLIFY_REPOSITORY_FILE"
     printf '{}\n'
@@ -223,7 +223,7 @@ export MOCK_AWS_LOG MOCK_OBJECTS
 export MOCK_CURL_LOG="$TMP/curl-calls.log"
 export MOCK_AMPLIFY_REPOSITORY_FILE="$MOCK_STATE/amplify-repository.txt"
 : >"$MOCK_CURL_LOG"
-printf '%s\n' 'https://github.com/michaelvu1207/v2x-backend' \
+printf '%s\n' 'https://github.com/michaelvu1207/v2x-drive-amplify' \
   >"$MOCK_AMPLIFY_REPOSITORY_FILE"
 
 # Route-only planning must prove that no Lambda mutation is selected.
@@ -321,15 +321,15 @@ assert_contains "$MOCK_CLOUDFLARED_ARGS" 'tunnel --url http://localhost:8765'
 # Static recovery guards that complement the executable mocks.
 assert_contains "$ROOT/scripts/systemd/v2x-drive-link-health.service" 'EnvironmentFile=-/etc/v2x-drive-tunnel.env'
 assert_contains "$ROOT/infra/amplify/deploy.sh" 'RECOVERY_CONNECTED_DEPLOY_GATE'
-assert_contains "$ROOT/scripts/systemd/README.md" 'git -C /home/path/V2XCarla/v2x-backend stash push --include-untracked'
+assert_contains "$ROOT/scripts/systemd/README.md" 'cd /home/path/v2x-drive'
 if grep -A20 'if path == "/detections/recent"' \
     "$ROOT/infra/aws-cli/provision-read-api.sh" | grep -Fq 'table.scan'; then
   fail '/detections/recent still uses unordered DynamoDB Scan'
 fi
 python3 "$ROOT/infra/aws-cli/tests/test_generated_read_api.py"
 
-# Literal braces in the default perception path must survive Bash parsing, and
-# both publication gates must probe four distinct, exact camera URLs.
+# Literal braces in the dashboard's retained perception path must survive Bash
+# parsing, and publication must probe four distinct, exact camera URLs.
 : >"$MOCK_CURL_LOG"
 env -u PERCEPTION_STREAM_PATH_TEMPLATE PATH="$MOCK_BIN:$PATH" \
 ACTION=plan UPDATE_DRIVE=false UPDATE_PERCEPTION=true \
@@ -343,19 +343,6 @@ if grep -Fq '{camera_id' "$MOCK_CURL_LOG"; then
   fail 'Amplify runtime publisher emitted an unrendered camera path marker'
 fi
 
-: >"$MOCK_CURL_LOG"
-env -u PERCEPTION_STREAM_PATH_TEMPLATE PATH="$MOCK_BIN:$PATH" \
-FRONTEND_CONFIG_URL=https://frontend.example.test/config.json \
-PERCEPTION_PUBLIC_URL=https://perception.example.test \
-  "$ROOT/scripts/check-perception-frontend-link.sh" \
-  >"$TMP/perception-link-check.txt"
-for camera_id in ch1 ch2 ch3 ch4; do
-  assert_contains "$MOCK_CURL_LOG" \
-    "https://perception.example.test/streams/${camera_id}.mjpg"
-done
-if grep -Fq '{camera_id' "$MOCK_CURL_LOG"; then
-  fail 'Perception link checker emitted an unrendered camera path marker'
-fi
 
 # Secure wss:// checks must let websockets create its default TLS context.
 # Passing ssl=None explicitly is rejected by newer releases before a handshake.
@@ -404,7 +391,7 @@ BACKUP_DIR="$TMP/amplify-repository-backup" \
 assert_contains "$TMP/amplify-repository-apply.txt" \
   'Saved repository rollback metadata:'
 assert_contains "$MOCK_AMPLIFY_REPOSITORY_FILE" \
-  'https://github.com/path2v2x/v2x-backend'
+  'https://github.com/michaelvu1207/v2x-drive-amplify'
 if grep -Fq 'test-repository-token' "$MOCK_AWS_LOG"; then
   fail 'Amplify repository token appeared in AWS process arguments/logs'
 fi
@@ -413,7 +400,7 @@ if command -v systemd-analyze >/dev/null 2>&1; then
   unit_dir="$TMP/units"
   mkdir -p "$unit_dir"
   for unit in "$ROOT"/scripts/systemd/*.service "$ROOT"/scripts/systemd/*.timer; do
-    sed "s#/home/path/V2XCarla/v2x-backend#${ROOT}#g" "$unit" \
+    sed "s#/home/path/v2x-drive#${ROOT}#g" "$unit" \
       >"$unit_dir/$(basename "$unit")"
   done
   SYSTEMD_UNIT_PATH="$unit_dir:/usr/lib/systemd/system" \

@@ -16,7 +16,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BRIDGE_DIR="${REPO_ROOT}/apps/bridge"
+BRIDGE_DIR="${REPO_ROOT}/apps/drive-server"
 
 # ── Configurable ──
 VENV="${VENV:-/home/path/V2XCarla/carla-venv-310/bin/activate}"

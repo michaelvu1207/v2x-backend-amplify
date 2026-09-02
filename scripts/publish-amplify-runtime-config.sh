@@ -10,9 +10,8 @@ AMPLIFY_APP_ID="${AMPLIFY_APP_ID:-d1ugco1rmb7yjj}"
 AMPLIFY_BRANCH="${AMPLIFY_BRANCH:-main}"
 ACTION="${ACTION:-plan}"
 UPDATE_DRIVE="${UPDATE_DRIVE:-true}"
-UPDATE_PERCEPTION="${UPDATE_PERCEPTION:-true}"
+UPDATE_PERCEPTION="${UPDATE_PERCEPTION:-false}"
 DRIVE_LOG_FILE="${DRIVE_LOG_FILE:-/tmp/v2x-cloudflared.log}"
-PERCEPTION_LOG_FILE="${PERCEPTION_LOG_FILE:-${LOG_FILE:-/tmp/v2x-perception-cloudflared.log}}"
 DRIVE_WS_URL="${DRIVE_WS_URL:-}"
 TAILSCALE_DRIVE_WS_URL="${TAILSCALE_DRIVE_WS_URL:-wss://path-b860i-aorus-pro-ice.tail1cad6a.ts.net}"
 PERCEPTION_STREAM_BASE_URL="${PERCEPTION_STREAM_BASE_URL:-}"
@@ -20,7 +19,7 @@ PERCEPTION_STREAM_PATH_TEMPLATE="${PERCEPTION_STREAM_PATH_TEMPLATE:-}"
 if [[ -z "$PERCEPTION_STREAM_PATH_TEMPLATE" ]]; then
   PERCEPTION_STREAM_PATH_TEMPLATE='/streams/{camera_id}.mjpg'
 fi
-BACKUP_DIR="${BACKUP_DIR:-/home/path/V2XCarla/v2x-backend-backups/amplify-runtime-config}"
+BACKUP_DIR="${BACKUP_DIR:-/home/path/v2x-drive-backups/amplify-runtime-config}"
 ROLLBACK_ENV_FILE="${ROLLBACK_ENV_FILE:-}"
 ROLLBACK_ENDPOINT_MODE="${ROLLBACK_ENDPOINT_MODE:-preserve-current}"
 EXPECTED_CURRENT_HASH="${EXPECTED_CURRENT_HASH:-}"
@@ -247,10 +246,7 @@ PY
 
   if [[ "$UPDATE_PERCEPTION" == "true" ]]; then
     if [[ -z "$PERCEPTION_STREAM_BASE_URL" ]]; then
-      PERCEPTION_STREAM_BASE_URL="$(extract_latest_quick_tunnel_url "$PERCEPTION_LOG_FILE" || true)"
-    fi
-    if [[ -z "$PERCEPTION_STREAM_BASE_URL" ]]; then
-      echo "No active Perception Quick Tunnel URL found in $PERCEPTION_LOG_FILE; set PERCEPTION_STREAM_BASE_URL explicitly." >&2
+      echo "Set PERCEPTION_STREAM_BASE_URL explicitly when UPDATE_PERCEPTION=true." >&2
       exit 6
     fi
     PERCEPTION_STREAM_BASE_URL="$(normalize_http_url "$PERCEPTION_STREAM_BASE_URL")"

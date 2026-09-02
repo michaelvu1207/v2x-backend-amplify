@@ -42,7 +42,7 @@ DEMO_VIDEO_URL_EXPIRES_SECONDS="${DEMO_VIDEO_URL_EXPIRES_SECONDS:-3600}"
 PLAN_ONLY="${PLAN_ONLY:-true}"
 RECONCILE_LAMBDA="${RECONCILE_LAMBDA:-false}"
 EXPECTED_CURRENT_STATE_HASH="${EXPECTED_CURRENT_STATE_HASH:-}"
-BACKUP_ROOT="${BACKUP_ROOT:-/home/path/V2XCarla/v2x-backend-backups/read-api-reconciliation}"
+BACKUP_ROOT="${BACKUP_ROOT:-/home/path/v2x-drive-backups/read-api-reconciliation}"
 MANAGED_INTEGRATION_DESCRIPTION="${MANAGED_INTEGRATION_DESCRIPTION:-managed-by=v2x-backend/provision-read-api}"
 
 ROUTE_KEYS=(

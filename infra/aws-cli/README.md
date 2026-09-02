@@ -248,7 +248,7 @@ state and refuses to mutate IAM without the matching
 `EXPECTED_CURRENT_STATE_HASH`.
 
 `ACTION=apply` writes a mode-0700 rollback directory under
-`/home/path/V2XCarla/v2x-backend-backups/iam-bootstrap/` before changing an
+`/home/path/v2x-drive-backups/iam-bootstrap/` before changing an
 existing role or inline policy. To restore an existing role, extract
 `.Role.AssumeRolePolicyDocument` from `role.json` and `.PolicyDocument` from
 `inline-policy.json`, then use `iam update-assume-role-policy` and

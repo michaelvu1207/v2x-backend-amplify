@@ -6,7 +6,7 @@ set -euo pipefail
 # deployment flags; a boot-time service must never destroy simulator state.
 
 CARLA_CONTAINER="${CARLA_CONTAINER:-carla-rr-maps}"
-CARLA_IMAGE="${CARLA_IMAGE:-ghcr.io/simforgeinc/carla-rr-maps:0.10.0}"
+CARLA_IMAGE="${CARLA_IMAGE:-}"
 CARLA_COMMAND="${CARLA_COMMAND:-./CarlaUnreal.sh -RenderOffScreen -vulkan -nosound -carla-rpc-port=2000}"
 ALLOW_CARLA_CONFIG_DRIFT="${ALLOW_CARLA_CONFIG_DRIFT:-false}"
 ACTION="${1:-run}"
@@ -54,7 +54,7 @@ if ! jq -e \
     --argjson command "$expected_command_json" \
     --argjson shell_command "$expected_shell_command_json" \
     '.[0]
-     | (.Config.Image == $image)
+     | (($image == "") or (.Config.Image == $image))
        and ((.Config.Cmd == $command) or (.Config.Cmd == $shell_command))
        and (.HostConfig.Runtime == "nvidia")
        and (.HostConfig.NetworkMode == "bridge")

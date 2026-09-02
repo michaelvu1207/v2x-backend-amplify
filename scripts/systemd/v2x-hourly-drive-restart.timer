@@ -1,8 +1,8 @@
 [Unit]
-Description=Hourly restart for V2X CARLA drive stack
+Description=Nightly restart for V2X CARLA drive stack
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*-*-* 04:00:00
 AccuracySec=1min
 Persistent=true
 Unit=v2x-hourly-drive-restart.service

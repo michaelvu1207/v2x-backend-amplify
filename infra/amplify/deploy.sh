@@ -41,10 +41,10 @@ CLOUDFLARE_DRIVE_WS_URL="${CLOUDFLARE_DRIVE_WS_URL:-${VITE_CLOUDFLARE_DRIVE_WS_U
 TAILSCALE_DRIVE_WS_URL="${TAILSCALE_DRIVE_WS_URL:-${VITE_TAILSCALE_DRIVE_WS_URL:-wss://path-b860i-aorus-pro-ice.tail1cad6a.ts.net}}"
 STOP_IN_PROGRESS_JOBS="${STOP_IN_PROGRESS_JOBS:-false}"
 RECOVERY_CONNECTED_DEPLOY_GATE="${RECOVERY_CONNECTED_DEPLOY_GATE:-}"
-EXPECTED_CANONICAL_REPOSITORY="${EXPECTED_CANONICAL_REPOSITORY:-https://github.com/path2v2x/v2x-backend}"
+EXPECTED_CANONICAL_REPOSITORY="${EXPECTED_CANONICAL_REPOSITORY:-https://github.com/michaelvu1207/v2x-drive-amplify}"
 EXPECTED_APP_METADATA_HASH="${EXPECTED_APP_METADATA_HASH:-}"
 EXPECTED_BRANCH_ENV_HASH="${EXPECTED_BRANCH_ENV_HASH:-}"
-RECOVERY_BACKUP_DIR="${RECOVERY_BACKUP_DIR:-/home/path/V2XCarla/v2x-backend-backups/amplify-deploy}"
+RECOVERY_BACKUP_DIR="${RECOVERY_BACKUP_DIR:-/home/path/v2x-drive-backups/amplify-deploy}"
 
 if [[ "${STOP_IN_PROGRESS_JOBS}" != "true" && "${STOP_IN_PROGRESS_JOBS}" != "false" ]]; then
   echo "STOP_IN_PROGRESS_JOBS must be true or false" >&2
@@ -57,7 +57,7 @@ if [[ -z "${API_BASE_URL}" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SITE_DIR="${ROOT}/apps/web"
+SITE_DIR="${ROOT}/apps/drive-web"
 
 if [[ -z "${STATE_BASE_URL}" ]]; then
   if [[ -n "${STATE_BUCKET}" ]]; then

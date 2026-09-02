@@ -13,7 +13,7 @@ Environment=DRIVE_TUNNEL_MODE=quick
 Environment=LOG_FILE=/tmp/v2x-cloudflared.log
 EnvironmentFile=-/etc/v2x-drive-tunnel.env
 ExecStartPre=/usr/bin/rm -f ${LOG_FILE}
-ExecStart=/home/path/V2XCarla/v2x-backend/scripts/launch-cloudflared-drive-tunnel.sh
+ExecStart=/home/path/v2x-drive/scripts/launch-cloudflared-drive-tunnel.sh
 Restart=always
 RestartSec=10
 TimeoutStopSec=30

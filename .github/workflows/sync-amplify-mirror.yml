@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   sync:
-    if: github.repository == 'michaelvu1207/v2x-backend-amplify'
+    if: github.repository == 'michaelvu1207/v2x-drive-amplify'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -26,7 +26,7 @@ jobs:
           set -euo pipefail
           canonical_ref=refs/remotes/canonical/main
           git fetch --no-tags \
-            https://github.com/path2v2x/v2x-backend.git \
+            https://github.com/path2v2x/v2x-drive.git \
             "+refs/heads/main:${canonical_ref}"
 
           mirror_sha="$(git rev-parse HEAD)"
