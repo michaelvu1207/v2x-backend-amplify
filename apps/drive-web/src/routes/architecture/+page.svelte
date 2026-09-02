@@ -1,6 +1,4 @@
 <script lang="ts">
-	import Header from '$lib/components/Header.svelte';
-
 	interface Node {
 		title: string;
 		detail: string;
@@ -73,7 +71,21 @@
 </svelte:head>
 
 <div class="flex h-screen flex-col overflow-hidden bg-gray-950">
-	<Header />
+	<header class="flex h-14 shrink-0 items-center justify-between border-b border-gray-800 bg-gray-950/80 px-4 backdrop-blur-sm">
+		<a href="/" class="flex items-center gap-3" aria-label="V2X home">
+			<img src="/logo.png" alt="V2X logo" class="h-8" />
+			<div>
+				<h1 class="text-sm font-semibold text-white">V2X</h1>
+				<p class="text-[10px] text-gray-500">Richmond Field Station</p>
+			</div>
+		</a>
+		<a
+			href="/"
+			class="rounded-full border border-gray-700/70 bg-gray-900 px-3 py-1.5 text-xs font-medium text-gray-300 transition-colors hover:border-gray-600 hover:text-white"
+		>
+			&larr; Home
+		</a>
+	</header>
 
 	<main class="min-h-0 flex-1 overflow-y-auto">
 		<div class="mx-auto flex max-w-7xl flex-col gap-8 px-4 py-6">

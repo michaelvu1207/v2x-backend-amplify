@@ -46,6 +46,16 @@
 
 	let pathname = $derived(page.url.pathname);
 
+	// Drive-app pages only. The digital twin and the architecture page are
+	// separate apps reached from the landing page, never from here.
+	const NAV_LINKS = [
+		{ href: '/', label: 'Home', short: 'Home' },
+		{ href: '/drive', label: 'Drive', short: 'Drive' },
+		{ href: '/live', label: 'Street View Live', short: 'Live' },
+		{ href: '/timeline', label: 'Timeline', short: 'Timeline' },
+		{ href: '/demo-videos', label: 'Demo Videos', short: 'Videos' }
+	] as const;
+
 	function navClass(href: string): string {
 		const active = href === '/'
 			? pathname === '/'
@@ -68,87 +78,27 @@
 		</a>
 
 	<nav class="hidden items-center gap-2 md:flex">
-		<a
-			href="/drive"
-			class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/drive')}`}
-			>
-				Drive
-			</a>
+		{#each NAV_LINKS as link}
 			<a
-				href="https://twin.path2v2x.net/"
-				target="_blank"
-				rel="noreferrer"
-				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/twin')}`}
+				href={link.href}
+				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass(link.href)}`}
 			>
-				Digital Twin &#8599;
+				{link.label}
 			</a>
-			<a
-				href="/live"
-				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/live')}`}
-			>
-				Street View Live
-			</a>
-			<a
-				href="/timeline"
-				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/timeline')}`}
-			>
-				Timeline
-			</a>
-			<a
-				href="/demo-videos"
-				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/demo-videos')}`}
-			>
-				Demo Videos
-			</a>
-			<a
-				href="/architecture"
-				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/architecture')}`}
-			>
-				Architecture
-			</a>
-		</nav>
+		{/each}
+	</nav>
 	</div>
 
 	<div class="flex items-center gap-5">
 		<nav class="flex items-center gap-2 md:hidden">
-			<a
-				href="/drive"
-				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/drive')}`}
-			>
-				Drive
-			</a>
-			<a
-				href="https://twin.path2v2x.net/"
-				target="_blank"
-				rel="noreferrer"
-				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/twin')}`}
-			>
-				Digital Twin &#8599;
-			</a>
-			<a
-				href="/live"
-				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/live')}`}
-			>
-				Street View Live
-			</a>
-			<a
-				href="/timeline"
-				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/timeline')}`}
-			>
-				Timeline
-			</a>
-			<a
-				href="/demo-videos"
-				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/demo-videos')}`}
-			>
-				Demo Videos
-			</a>
-			<a
-				href="/architecture"
-				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/architecture')}`}
-			>
-				Architecture
-			</a>
+			{#each NAV_LINKS as link}
+				<a
+					href={link.href}
+					class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass(link.href)}`}
+				>
+					{link.short}
+				</a>
+			{/each}
 		</nav>
 		<!-- Stats -->
 		<div class="hidden items-center gap-4 sm:flex">
