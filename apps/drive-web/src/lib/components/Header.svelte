@@ -92,6 +92,12 @@
 			>
 				Demo Videos
 			</a>
+			<a
+				href="/architecture"
+				class={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${navClass('/architecture')}`}
+			>
+				Architecture
+			</a>
 		</nav>
 	</div>
 
@@ -120,6 +126,12 @@
 				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/demo-videos')}`}
 			>
 				Demo Videos
+			</a>
+			<a
+				href="/architecture"
+				class={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${navClass('/architecture')}`}
+			>
+				Architecture
 			</a>
 		</nav>
 		<!-- Stats -->
