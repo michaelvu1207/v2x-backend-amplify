@@ -55,9 +55,9 @@ are available as low-latency HLS under
 40-hour recording archive under `https://drive.path2v2x.net/archive/`. Set
 `liveVideoUrlTemplate` to
 `https://drive.path2v2x.net/camera/{camera_id}/index.m3u8` and
-`archiveVideoBaseUrl` to `https://drive.path2v2x.net/archive`. Empty values
-preserve their Kinesis browser-session fallbacks while AWS video resources are
-being decommissioned.
+`archiveVideoBaseUrl` to `https://drive.path2v2x.net/archive`. Both values are
+required for raw video; an empty value makes the corresponding card report
+`Video source not configured`. Camera video never leaves path-rfs.
 
 ## Local development
 

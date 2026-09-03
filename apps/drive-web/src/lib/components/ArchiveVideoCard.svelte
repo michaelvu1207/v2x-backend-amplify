@@ -1,11 +1,10 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
-	import Hls from 'hls.js';
-	import { archiveClipUrl, fetchVideoSession, listArchiveSegments } from '$lib/api';
+	import { archiveClipUrl, listArchiveSegments } from '$lib/api';
 	import {
 		archiveCursorNeedsCorrection,
-		archiveEpochForMediaTime,
 		archiveMediaTimeForEpoch,
+		archiveEpochForMediaTime,
 		formatClock
 	} from '$lib/timeline';
 
@@ -43,38 +42,24 @@
 	let error = $state<string | null>(null);
 	let noRecording = $state(false);
 	let currentEpochMs = $state<number | null>(null);
-	let hls: Hls | null = null;
 	let loadedWindowKey = '';
 	let requestSerial = 0;
-	// KVS HLS maps media time through EXT-X-PROGRAM-DATE-TIME. A local MP4
-	// instead starts at localClipStartMs and needs no playlist timestamp.
-	let pdtOffsetMs: number | null = null;
+	// Local MP4 media time is relative to the first recording in the clip.
 	let localClipStartMs: number | null = null;
 	let appliedSeekNonce = -1;
 
 	function destroyPlayer() {
-		if (hls) {
-			hls.destroy();
-			hls = null;
-		}
 		if (videoEl) {
 			videoEl.pause();
 			videoEl.removeAttribute('src');
 			videoEl.load();
 		}
-		pdtOffsetMs = null;
 		localClipStartMs = null;
 		currentEpochMs = null;
 	}
 
 	function mediaTimeForEpoch(epochMs: number): number {
-		const base = localClipStartMs;
-		if (base !== null) {
-			return Math.max(0, (epochMs - base) / 1000);
-		}
-		// Before the first KVS fragment lands, use the playback window as a
-		// provisional base. FRAG_CHANGED corrects this with the real PDT.
-		return archiveMediaTimeForEpoch(epochMs, pdtOffsetMs, windowStartMs);
+		return archiveMediaTimeForEpoch(epochMs, localClipStartMs, windowStartMs);
 	}
 
 	async function loadLocalArchive(serial: number) {
@@ -118,37 +103,6 @@
 		videoEl.load();
 	}
 
-	async function loadKinesisArchive(serial: number) {
-		const session = await fetchVideoSession(cameraId, { start: windowStart, end: windowEnd });
-		if (serial !== requestSerial || !videoEl) return;
-		if (Hls.isSupported()) {
-			hls = new Hls({ enableWorker: true, lowLatencyMode: false });
-			hls.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
-				const pdt = data.frag.programDateTime;
-				if (pdt) {
-					pdtOffsetMs = pdt - data.frag.start * 1000;
-					if (videoEl) {
-						const target = mediaTimeForEpoch(cursorMs);
-						const currentEpoch = pdtOffsetMs + videoEl.currentTime * 1000;
-						if (archiveCursorNeedsCorrection(cursorMs, currentEpoch)) {
-							videoEl.currentTime = target;
-						}
-					}
-				}
-			});
-			hls.on(Hls.Events.ERROR, (_event, data) => {
-				if (data.fatal) {
-					error = `Playback error: ${data.details}`;
-				}
-			});
-			hls.loadSource(session.hlsUrl);
-			hls.attachMedia(videoEl);
-		} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-			videoEl.src = session.hlsUrl;
-		} else {
-			throw new Error('HLS playback is not supported in this browser');
-		}
-	}
 
 	async function loadWindow() {
 		const key = `${cameraId}|${windowStart}|${windowEnd}|${archiveVideoBaseUrl}`;
@@ -161,11 +115,10 @@
 		loadedWindowKey = key;
 
 		try {
-			if (archiveVideoBaseUrl) {
-				await loadLocalArchive(serial);
-			} else {
-				await loadKinesisArchive(serial);
+			if (!archiveVideoBaseUrl.trim()) {
+				throw new Error('Video source not configured');
 			}
+			await loadLocalArchive(serial);
 			if (serial !== requestSerial || !videoEl || noRecording) return;
 			videoEl.currentTime = mediaTimeForEpoch(cursorMs);
 			if (playing) {
@@ -188,10 +141,10 @@
 
 	function handleTimeUpdate() {
 		if (!videoEl) return;
-		currentEpochMs =
-			localClipStartMs === null
-				? (pdtOffsetMs ?? windowStartMs) + videoEl.currentTime * 1000
-				: archiveEpochForMediaTime(localClipStartMs, videoEl.currentTime);
+		currentEpochMs = archiveEpochForMediaTime(
+			localClipStartMs ?? windowStartMs,
+			videoEl.currentTime
+		);
 		if (isPrimary) {
 			onTimeUpdate?.(currentEpochMs);
 		}

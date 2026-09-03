@@ -1,166 +1,42 @@
 <script lang="ts">
 	import { onDestroy, tick } from 'svelte';
 	import Hls from 'hls.js';
-	import { fetchVideoSession } from '$lib/api';
 	import { resolveLiveVideoUrl } from '$lib/runtime-config';
 	import { playWithAbortRetry } from '$lib/media-play';
 
 	interface Props {
 		cameraId: string;
 		streamUrl?: string;
-		liveVideoUrlTemplate?: string;
+		liveVideoUrlTemplate: string;
 		sourceLabel?: string;
 	}
 
 	let {
 		cameraId,
 		streamUrl = '',
-		liveVideoUrlTemplate = '',
+		liveVideoUrlTemplate,
 		sourceLabel = 'Raw'
 	}: Props = $props();
 
-	let videoElA = $state<HTMLVideoElement | null>(null);
-	let videoElB = $state<HTMLVideoElement | null>(null);
-	let activeVideoIndex = $state<0 | 1>(0);
+	let videoEl = $state<HTMLVideoElement | null>(null);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let connected = $state(false);
-	let sessionExpiresIn = $state<number | null>(null);
 	let mjpegUrl = $state('');
-	let players: [Hls | null, Hls | null] = [null, null];
-	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+	let player: Hls | null = null;
 	let connectionKey = '';
 	let connectionRevision = 0;
 
-	function clearRefreshTimer() {
-		if (refreshTimer) {
-			clearTimeout(refreshTimer);
-			refreshTimer = null;
-		}
-	}
-
-	function renewalLeadSeconds(): number {
-		// Four cards are normally mounted together. Deterministic spacing avoids
-		// briefly doubling all four decoders and starving the streams that are
-		// still visible. Unknown camera IDs retain the conservative middle lead.
-		const cameraOrder = ['ch1', 'ch2', 'ch3', 'ch4'];
-		const cameraIndex = cameraOrder.indexOf(cameraId);
-		return cameraIndex < 0 ? 45 : 60 - cameraIndex * 10;
-	}
-
-	function scheduleRefresh(expiresIn: number | null) {
-		clearRefreshTimer();
-		const leadSeconds = renewalLeadSeconds();
-		if (!expiresIn || expiresIn <= leadSeconds + 5) return;
-		refreshTimer = setTimeout(() => {
-			void renewSession();
-		}, (expiresIn - leadSeconds) * 1000);
-	}
-
-	function videoAt(index: 0 | 1): HTMLVideoElement | null {
-		return index === 0 ? videoElA : videoElB;
-	}
-
-	function destroySlot(index: 0 | 1) {
-		if (players[index]) {
-			players[index]?.destroy();
-			players[index] = null;
-		}
-		const video = videoAt(index);
-		if (video) {
-			video.pause();
-			video.removeAttribute('src');
-			video.load();
-		}
-	}
-
 	function destroyPlayer() {
-		clearRefreshTimer();
+		player?.destroy();
+		player = null;
 		mjpegUrl = '';
-		destroySlot(0);
-		destroySlot(1);
+		if (videoEl) {
+			videoEl.pause();
+			videoEl.removeAttribute('src');
+			videoEl.load();
+		}
 		connected = false;
-	}
-
-	async function attachHls(url: string, index: 0 | 1, useCredentials = false) {
-		destroySlot(index);
-		const video = videoAt(index);
-		if (!video) throw new Error('Video element unavailable');
-		video.crossOrigin = useCredentials ? 'use-credentials' : 'anonymous';
-
-		if (Hls.isSupported()) {
-			const player = new Hls({
-				enableWorker: true,
-				lowLatencyMode: false,
-				...(useCredentials
-					? {
-							xhrSetup: (xhr: XMLHttpRequest) => {
-								xhr.withCredentials = true;
-							}
-						}
-					: {})
-			});
-			players[index] = player;
-			player.loadSource(url);
-			player.attachMedia(video);
-		} else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-			video.src = url;
-		} else {
-			throw new Error('HLS playback is not supported in this browser');
-		}
-
-		// The play promise resolves only once playback has actually begun. This
-		// makes a standby player safe to reveal during a session handoff. A
-		// pending play() can be interrupted (AbortError) when four decoders start
-		// at once; that is retried once rather than surfaced as a dead card.
-		let playbackTimeout: ReturnType<typeof setTimeout> | null = null;
-		try {
-			await Promise.race([
-				playWithAbortRetry(video),
-				new Promise<never>((_resolve, reject) => {
-					playbackTimeout = setTimeout(
-						() => reject(new Error('Timed out preparing video session')),
-						20_000
-					);
-				})
-			]);
-		} finally {
-			if (playbackTimeout) clearTimeout(playbackTimeout);
-		}
-	}
-
-	async function renewSession() {
-		const revision = connectionRevision;
-		const oldIndex = activeVideoIndex;
-		const standbyIndex: 0 | 1 = oldIndex === 0 ? 1 : 0;
-		try {
-			const session = await fetchVideoSession(cameraId);
-			if (revision !== connectionRevision) return;
-			await attachHls(session.hlsUrl, standbyIndex);
-			if (revision !== connectionRevision) {
-				destroySlot(standbyIndex);
-				return;
-			}
-
-			// Switch only after the replacement stream is already playing, then
-			// retire the old expiring session on the next render turn.
-			activeVideoIndex = standbyIndex;
-			sessionExpiresIn = session.expiresIn;
-			error = null;
-			connected = true;
-			scheduleRefresh(session.expiresIn);
-			await tick();
-			await new Promise((resolve) => setTimeout(resolve, 200));
-			if (revision === connectionRevision) destroySlot(oldIndex);
-		} catch (err) {
-			if (revision !== connectionRevision) return;
-			destroySlot(standbyIndex);
-			error = err instanceof Error ? err.message : 'Video session renewal failed';
-			// Keep the still-playing active session and retry while its early-renewal
-			// safety margin remains available.
-			clearRefreshTimer();
-			refreshTimer = setTimeout(() => void renewSession(), 5_000);
-		}
 	}
 
 	function isImageStream(url: string): boolean {
@@ -175,13 +51,36 @@
 		);
 	}
 
+	async function attachHls(url: string, useCredentials: boolean) {
+		if (!videoEl) throw new Error('Video element unavailable');
+		videoEl.crossOrigin = useCredentials ? 'use-credentials' : 'anonymous';
+		if (Hls.isSupported()) {
+			player = new Hls({
+				enableWorker: true,
+				lowLatencyMode: false,
+				...(useCredentials
+					? {
+							xhrSetup: (xhr: XMLHttpRequest) => {
+								xhr.withCredentials = true;
+							}
+						}
+					: {})
+			});
+			player.loadSource(url);
+			player.attachMedia(videoEl);
+		} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+			videoEl.src = url;
+		} else {
+			throw new Error('HLS playback is not supported in this browser');
+		}
+		await playWithAbortRetry(videoEl);
+	}
+
 	async function connect() {
 		const revision = ++connectionRevision;
 		loading = true;
 		error = null;
 		destroyPlayer();
-		// MJPEG renders an <img> while HLS needs a <video>. Let Svelte apply
-		// that element swap before attaching a newly selected HLS source.
 		await tick();
 		if (revision !== connectionRevision) return;
 
@@ -189,37 +88,18 @@
 			const explicitStreamUrl = streamUrl.trim();
 			const sourceUrl =
 				explicitStreamUrl || resolveLiveVideoUrl(liveVideoUrlTemplate, cameraId);
-			let hlsUrl = sourceUrl;
-			if (sourceUrl) {
-				sessionExpiresIn = null;
-				scheduleRefresh(null);
-			} else {
-				const session = await fetchVideoSession(cameraId);
-				if (revision !== connectionRevision) return;
-				hlsUrl = session.hlsUrl;
-				sessionExpiresIn = session.expiresIn;
-				scheduleRefresh(session.expiresIn);
+			if (!sourceUrl) {
+				throw new Error('Video source not configured');
 			}
-
-			if (revision !== connectionRevision) return;
-			if (sourceUrl && isImageStream(sourceUrl)) {
+			if (isImageStream(sourceUrl)) {
 				mjpegUrl = sourceUrl;
-				connected = true;
 				return;
 			}
-
-			// Prefer hls.js whenever Media Source Extensions are available. Recent
-			// Chromium builds report native HLS support on Linux but intermittently
-			// fail fMP4 Kinesis playlists with a non-recovering demux/ORB error.
-			// Safari has no hls.js MSE path and falls through to native HLS.
-			activeVideoIndex = 0;
 			await attachHls(
-				hlsUrl,
-				0,
+				sourceUrl,
 				Boolean(liveVideoUrlTemplate.trim() && !explicitStreamUrl)
 			);
-			if (revision !== connectionRevision) return;
-			connected = true;
+			if (revision === connectionRevision) connected = true;
 		} catch (err) {
 			if (revision !== connectionRevision) return;
 			error = err instanceof Error ? err.message : 'Unknown playback error';
@@ -256,11 +136,6 @@
 				Live
 			</span>
 		{/if}
-		{#if sessionExpiresIn}
-			<span class="bg-black/70 px-2 py-1 text-[10px] text-gray-400">
-				{sessionExpiresIn}s
-			</span>
-		{/if}
 	</div>
 
 	<div class="absolute inset-0">
@@ -279,20 +154,8 @@
 			/>
 		{:else}
 			<video
-				bind:this={videoElA}
-				class="absolute inset-0 h-full w-full object-cover transition-opacity duration-150"
-				class:opacity-0={activeVideoIndex !== 0}
-				class:opacity-100={activeVideoIndex === 0}
-				aria-hidden={activeVideoIndex !== 0}
-				playsinline
-				muted
-			></video>
-			<video
-				bind:this={videoElB}
-				class="absolute inset-0 h-full w-full object-cover transition-opacity duration-150"
-				class:opacity-0={activeVideoIndex !== 1}
-				class:opacity-100={activeVideoIndex === 1}
-				aria-hidden={activeVideoIndex !== 1}
+				bind:this={videoEl}
+				class="absolute inset-0 h-full w-full object-cover"
 				playsinline
 				muted
 			></video>

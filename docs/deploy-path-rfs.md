@@ -45,9 +45,10 @@ endpoint overlay.
 
 ## Camera relay
 
-The raw Richmond Field Station feeds are copied from the existing demux Unix
-sockets into MediaMTX; the relay never opens a second camera RTSP session and
-does not change the parallel AWS Kinesis uploader. Install or update it as root:
+The raw Richmond Field Station feeds are copied from the demux Unix sockets
+into MediaMTX; the relay never opens a second camera RTSP session. The demux
+feeds only local consumers, so camera video never leaves path-rfs. Install or
+update the relay as root:
 
 ```bash
 cd /home/path/v2x-drive
@@ -61,9 +62,9 @@ and recording playback as `https://<drive-or-twin-host>/archive/`. The
 checked-in firewall drops new external connections to all loopback service
 ports. Set `liveVideoUrlTemplate` to
 `https://drive.path2v2x.net/camera/{camera_id}/index.m3u8` and
-`archiveVideoBaseUrl` to `https://drive.path2v2x.net/archive`. An empty live
-template preserves the Kinesis live-session fallback; an empty archive base
-preserves the Kinesis archive-session fallback during decommissioning.
+`archiveVideoBaseUrl` to `https://drive.path2v2x.net/archive`. Both values are
+required; if either is empty, its video card reports `Video source not
+configured`.
 
 Both `/etc/nginx/sites-available/v2x-drive-public` and `v2x-twin` proxy
 `/archive/` to `http://127.0.0.1:9996/` with buffering disabled. Their CORS

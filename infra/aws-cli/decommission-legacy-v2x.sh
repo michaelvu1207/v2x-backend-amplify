@@ -26,6 +26,7 @@ LAMBDA_ROLE_POLICY_NAME="${LAMBDA_ROLE_POLICY_NAME:-v2x-detections-ddb-put}"
 AMPLIFY_APP_NAME="${AMPLIFY_APP_NAME:-v2x-viewer}"
 
 echo "Decommissioning legacy V2X resources..."
+echo "Camera video is local to path-rfs; no Kinesis Video resources are part of this legacy stack."
 
 APP_ID="$(AWS_REGION="${AMPLIFY_REGION}" aws amplify list-apps --max-results 100 --query "apps[?name==\`${AMPLIFY_APP_NAME}\`].appId | [0]" --output text 2>/dev/null || true)"
 if [[ -n "${APP_ID}" && "${APP_ID}" != "None" ]]; then

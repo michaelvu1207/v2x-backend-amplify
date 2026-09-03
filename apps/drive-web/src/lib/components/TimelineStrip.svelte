@@ -1,8 +1,7 @@
 <script lang="ts">
-	import type { CoverageInterval, TimelineEvent, TimelineHistogramBucket } from '$lib/types';
+	import type { TimelineEvent, TimelineHistogramBucket } from '$lib/types';
 	import {
 		formatClock,
-		layoutCoverage,
 		layoutHistogram,
 		layoutMarkers,
 		objectTypeColor,
@@ -17,7 +16,6 @@
 		events: TimelineEvent[];
 		histogram: TimelineHistogramBucket[];
 		bucketSeconds: number;
-		coverage: CoverageInterval[];
 		selectedObjectId: string | null;
 		onScrub: (epochMs: number) => void;
 		onSelectEvent: (event: TimelineEvent) => void;
@@ -32,7 +30,6 @@
 		events,
 		histogram,
 		bucketSeconds,
-		coverage,
 		selectedObjectId,
 		onScrub,
 		onSelectEvent,
@@ -47,7 +44,6 @@
 	const MAX_SPAN_MS = 24 * 60 * 60 * 1000;
 
 	let markers = $derived(layoutMarkers(events, viewStartMs, viewEndMs));
-	let coverageSegments = $derived(layoutCoverage(coverage, viewStartMs, viewEndMs));
 	let histogramBars = $derived(
 		layoutHistogram(histogram, bucketSeconds, viewStartMs, viewEndMs)
 	);
@@ -155,18 +151,9 @@
 		onpointerup={handlePointerUp}
 		onwheel={handleWheel}
 	>
-		<!-- Coverage: recorded video for the selected camera -->
-		<div class="absolute inset-x-0 top-0 h-2 bg-gray-900">
-			{#each coverageSegments as segment}
-				<div
-					class="absolute top-0 h-full bg-emerald-700/80"
-					style={`left:${segment.x * 100}%;width:${segment.width * 100}%`}
-				></div>
-			{/each}
-		</div>
 
 		<!-- Detection density -->
-		<div class="absolute inset-x-0 top-2 bottom-6">
+		<div class="absolute inset-x-0 top-0 bottom-6">
 			{#each histogramBars as bar}
 				<div
 					class="absolute bottom-0"
@@ -178,7 +165,7 @@
 		<!-- Event markers: first appearance of each track -->
 		{#each markers as marker}
 			<button
-				class="absolute top-2 bottom-6 w-[3px] -translate-x-1/2 opacity-80 hover:opacity-100"
+				class="absolute top-0 bottom-6 w-[3px] -translate-x-1/2 opacity-80 hover:opacity-100"
 				class:!w-[5px]={marker.event.object_id === selectedObjectId}
 				style={`left:${marker.x * 100}%;background:${marker.color}`}
 				aria-label={`${marker.event.object_type} ${marker.event.object_id}`}

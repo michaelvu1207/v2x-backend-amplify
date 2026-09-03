@@ -24,17 +24,6 @@ STAGE_NAME="${STAGE_NAME:-\$default}"
 # the pre-provisioned role with READ_LAMBDA_ROLE_ARN.
 ATTACH_DDB_READ_POLICY="${ATTACH_DDB_READ_POLICY:-false}"
 READ_POLICY_NAME="${READ_POLICY_NAME:-v2x-backend-detections-ddb-read}"
-VIDEO_AWS_REGION="${VIDEO_AWS_REGION:-us-west-2}"
-VIDEO_STREAM_PREFIX="${VIDEO_STREAM_PREFIX:-v2x-backend-cam-}"
-VIDEO_HLS_EXPIRES_SECONDS="${VIDEO_HLS_EXPIRES_SECONDS:-300}"
-VIDEO_ONDEMAND_EXPIRES_SECONDS="${VIDEO_ONDEMAND_EXPIRES_SECONDS:-3600}"
-HLS_PROXY_PREFIX="${HLS_PROXY_PREFIX:-hls-proxy/v1/}"
-HLS_PROXY_FETCH_TIMEOUT_SECONDS="${HLS_PROXY_FETCH_TIMEOUT_SECONDS:-8}"
-HLS_PROXY_PLAYLIST_MAX_BYTES="${HLS_PROXY_PLAYLIST_MAX_BYTES:-1048576}"
-HLS_PROXY_SEGMENT_MAX_BYTES="${HLS_PROXY_SEGMENT_MAX_BYTES:-4194304}"
-HLS_SESSION_THROTTLE_BURST="${HLS_SESSION_THROTTLE_BURST:-8}"
-HLS_SESSION_THROTTLE_RATE="${HLS_SESSION_THROTTLE_RATE:-2.0}"
-HLS_PROXY_LIFECYCLE_DAYS="${HLS_PROXY_LIFECYCLE_DAYS:-1}"
 SITE_GEOHASH="${SITE_GEOHASH:-9q9p8}"
 SNAPSHOT_URL_EXPIRES_SECONDS="${SNAPSHOT_URL_EXPIRES_SECONDS:-300}"
 DEMO_VIDEOS_PREFIX="${DEMO_VIDEOS_PREFIX:-demo-videos/}"
@@ -54,11 +43,14 @@ ROUTE_KEYS=(
   "GET /state"
   "GET /map-data"
   "GET /snapshots/{object_id}/latest"
+  "GET /detections/timeline"
+)
+
+RETIRED_ROUTE_KEYS=(
   "GET /video/session/{camera_id}"
   "GET /video/browser-session/{camera_id}"
   "GET /video/proxy/{token}/{resource_id}"
   "GET /video/coverage/{camera_id}"
-  "GET /detections/timeline"
 )
 
 case "${PLAN_ONLY}" in
@@ -85,20 +77,6 @@ case "${RECONCILE_LAMBDA}" in
     ;;
 esac
 
-if [[ ! "${HLS_SESSION_THROTTLE_BURST}" =~ ^[1-9][0-9]*$ ]] ||
-   (( HLS_SESSION_THROTTLE_BURST > 100 )); then
-  echo "HLS_SESSION_THROTTLE_BURST must be an integer from 1 through 100" >&2
-  exit 2
-fi
-if ! jq -en --arg value "${HLS_SESSION_THROTTLE_RATE}" \
-  '($value | tonumber?) as $rate | $rate != null and $rate > 0 and $rate <= 100' >/dev/null; then
-  echo "HLS_SESSION_THROTTLE_RATE must be greater than 0 and at most 100" >&2
-  exit 2
-fi
-if [[ ! "${HLS_PROXY_LIFECYCLE_DAYS}" =~ ^[1-7]$ ]]; then
-  echo "HLS_PROXY_LIFECYCLE_DAYS must be an integer from 1 through 7" >&2
-  exit 2
-fi
 
 if [[ "${RECONCILE_LAMBDA}" == "false" && "${ATTACH_DDB_READ_POLICY}" == "true" ]]; then
   echo "RECONCILE_LAMBDA=false is a route-only recovery mode and cannot mutate Lambda IAM." >&2
@@ -106,7 +84,7 @@ if [[ "${RECONCILE_LAMBDA}" == "false" && "${ATTACH_DDB_READ_POLICY}" == "true" 
 fi
 if [[ "${PLAN_ONLY}" == "false" && "${RECONCILE_LAMBDA}" == "true" && \
       "${ATTACH_DDB_READ_POLICY}" != "true" ]]; then
-  echo "The HLS proxy requires its reviewed, prefix-scoped state policy; Lambda reconciliation requires ATTACH_DDB_READ_POLICY=true." >&2
+  echo "Lambda reconciliation requires ATTACH_DDB_READ_POLICY=true so its least-privilege execution policy is reconciled with the code." >&2
   exit 2
 fi
 
@@ -157,22 +135,6 @@ if [[ "${ATTACH_DDB_READ_POLICY}" == "true" ]]; then
     },
     {
       "Effect":"Allow",
-      "Action":[
-        "kinesisvideo:DescribeStream",
-        "kinesisvideo:GetDataEndpoint",
-        "kinesisvideo:ListFragments"
-      ],
-      "Resource":[
-        "arn:aws:kinesisvideo:${VIDEO_AWS_REGION}:${ACCOUNT_ID}:stream/${VIDEO_STREAM_PREFIX}*"
-      ]
-    },
-    {
-      "Effect":"Allow",
-      "Action":[ "kinesisvideo:GetHLSStreamingSessionURL" ],
-      "Resource":"*"
-    },
-    {
-      "Effect":"Allow",
       "Action":[ "s3:ListBucket" ],
       "Resource":[ "arn:aws:s3:::${STATE_BUCKET}" ]
     },
@@ -184,11 +146,6 @@ if [[ "${ATTACH_DDB_READ_POLICY}" == "true" ]]; then
         "arn:aws:s3:::${STATE_BUCKET}/snapshots/*",
         "arn:aws:s3:::${STATE_BUCKET}/${DEMO_VIDEOS_PREFIX}*"
       ]
-    },
-    {
-      "Effect":"Allow",
-      "Action":[ "s3:GetObject", "s3:PutObject", "s3:DeleteObject" ],
-      "Resource":[ "arn:aws:s3:::${STATE_BUCKET}/${HLS_PROXY_PREFIX}*" ]
     }
   ]
 }
@@ -268,43 +225,6 @@ if [[ "${ATTACH_DDB_READ_POLICY}" == "true" && -n "${ROLE_NAME}" ]]; then
   fi
 fi
 
-HLS_PROXY_LIFECYCLE_RULE_ID="v2x-hls-proxy-expiry-v1"
-BUCKET_LIFECYCLE_EXISTS=false
-BUCKET_LIFECYCLE_JSON='{"Rules":[]}'
-if [[ "${RECONCILE_LAMBDA}" == "true" ]]; then
-  lifecycle_file="${WORKDIR}/bucket-lifecycle.json"
-  lifecycle_error="${WORKDIR}/bucket-lifecycle.err"
-  if aws_read_allow_not_found "${lifecycle_file}" "${lifecycle_error}" \
-      aws s3api get-bucket-lifecycle-configuration \
-        --bucket "${STATE_BUCKET}" \
-        --expected-bucket-owner "${ACCOUNT_ID}" \
-        --output json; then
-    BUCKET_LIFECYCLE_EXISTS=true
-    BUCKET_LIFECYCLE_JSON="$(<"${lifecycle_file}")"
-  else
-    status=$?
-    if [[ "${status}" -ne 1 ]]; then
-      exit "${status}"
-    fi
-  fi
-fi
-DESIRED_LIFECYCLE_FILE="${WORKDIR}/desired-bucket-lifecycle.json"
-jq -n \
-  --argjson current "${BUCKET_LIFECYCLE_JSON}" \
-  --arg rule_id "${HLS_PROXY_LIFECYCLE_RULE_ID}" \
-  --arg prefix "${HLS_PROXY_PREFIX}" \
-  --argjson days "${HLS_PROXY_LIFECYCLE_DAYS}" \
-  '{Rules: (
-    (($current.Rules // []) | map(select(.ID != $rule_id)))
-    + [{
-      ID: $rule_id,
-      Status: "Enabled",
-      Filter: {Prefix: $prefix},
-      Expiration: {Days: $days},
-      AbortIncompleteMultipartUpload: {DaysAfterInitiation: 1}
-    }]
-  )}' >"${DESIRED_LIFECYCLE_FILE}"
-DESIRED_LIFECYCLE_HASH="$(sha256sum "${DESIRED_LIFECYCLE_FILE}" | awk '{print $1}')"
 
 MATCHING_API_IDS=()
 if [[ -n "${API_ID}" ]]; then
@@ -351,9 +271,6 @@ jq -nS \
   --argjson role_inline_policy_exists "${READ_ROLE_INLINE_POLICY_EXISTS}" \
   --argjson role_inline_policy "${READ_ROLE_INLINE_POLICY_JSON}" \
   --arg desired_role_inline_policy_sha256 "${DESIRED_POLICY_HASH}" \
-  --argjson bucket_lifecycle_exists "${BUCKET_LIFECYCLE_EXISTS}" \
-  --argjson bucket_lifecycle "${BUCKET_LIFECYCLE_JSON}" \
-  --arg desired_bucket_lifecycle_sha256 "${DESIRED_LIFECYCLE_HASH}" \
   --argjson api_exists "${API_EXISTS}" \
   --argjson api "${API_JSON}" \
   --argjson integrations "${INTEGRATIONS_JSON}" \
@@ -368,9 +285,6 @@ jq -nS \
     readRoleInlinePolicyExists: $role_inline_policy_exists,
     readRoleInlinePolicy: $role_inline_policy,
     desiredReadRoleInlinePolicySha256: $desired_role_inline_policy_sha256,
-    bucketLifecycleExists: $bucket_lifecycle_exists,
-    bucketLifecycle: $bucket_lifecycle,
-    desiredBucketLifecycleSha256: $desired_bucket_lifecycle_sha256,
     apiExists: $api_exists,
     api: $api,
     integrations: $integrations,
@@ -507,11 +421,6 @@ print_reconciliation_plan() {
   echo "Read API reconciliation plan (read-only):"
   echo "  currentStateHash=${CURRENT_STATE_HASH}"
   echo "  reconcileLambda=${RECONCILE_LAMBDA}"
-  echo "  THROTTLE GET /video/session/{camera_id}: burst=${HLS_SESSION_THROTTLE_BURST}, rate=${HLS_SESSION_THROTTLE_RATE}/second"
-  echo "  THROTTLE GET /video/browser-session/{camera_id}: burst=${HLS_SESSION_THROTTLE_BURST}, rate=${HLS_SESSION_THROTTLE_RATE}/second"
-  if [[ "${RECONCILE_LAMBDA}" == "true" ]]; then
-    echo "  RECONCILE S3 lifecycle ${HLS_PROXY_LIFECYCLE_RULE_ID}: expire ${HLS_PROXY_PREFIX} after ${HLS_PROXY_LIFECYCLE_DAYS} day(s)"
-  fi
   if [[ "${ATTACH_DDB_READ_POLICY}" == "true" ]]; then
     if [[ -n "${ROLE_NAME}" ]]; then
       echo "  RECONCILE explicitly requested IAM inline policy ${READ_POLICY_NAME} on ${ROLE_NAME}"
@@ -521,9 +430,6 @@ print_reconciliation_plan() {
     fi
   else
     echo "  KEEP IAM unchanged (ATTACH_DDB_READ_POLICY=false)"
-    if [[ "${RECONCILE_LAMBDA}" == "true" ]]; then
-      echo "  BLOCKED FOR APPLY: HLS proxy state access has not been reconciled"
-    fi
   fi
 
   if [[ "${RECONCILE_LAMBDA}" == "false" ]]; then
@@ -566,6 +472,16 @@ print_reconciliation_plan() {
       echo "  RETARGET route ${route_key}: ${target:-<none>} -> ${desired_target}"
     else
       echo "  KEEP route ${route_key} -> ${target}"
+    fi
+  done
+  for route_key in "${RETIRED_ROUTE_KEYS[@]}"; do
+    route_id="$(
+      jq -r --arg route_key "${route_key}" \
+        '.Items[]? | select(.RouteKey == $route_key) | .RouteId' \
+        <<<"${ROUTES_JSON}" | head -n 1
+    )"
+    if [[ -n "${route_id}" ]]; then
+      echo "  DELETE retired route ${route_key}"
     fi
   done
 
@@ -649,14 +565,6 @@ else
   printf 'false\n' >"${backup_dir}/api-existed.txt"
 fi
 
-if [[ "${RECONCILE_LAMBDA}" == "true" ]]; then
-  printf '%s\n' "${BUCKET_LIFECYCLE_EXISTS}" \
-    >"${backup_dir}/bucket-lifecycle-existed.txt"
-  jq -S . <<<"${BUCKET_LIFECYCLE_JSON}" \
-    >"${backup_dir}/bucket-lifecycle-before.json"
-  install -m 0600 "${DESIRED_LIFECYCLE_FILE}" \
-    "${backup_dir}/desired-bucket-lifecycle.json"
-fi
 
 printf '%s\n' \
   "apiId=${API_ID:-absent}" \
@@ -709,30 +617,23 @@ jq -n \
   --arg TABLE_NAME "${TABLE_NAME}" \
   --arg GSI_NAME gsi_geohash_time \
   --arg MAX_LIMIT 200 \
-  --arg VIDEO_AWS_REGION "${VIDEO_AWS_REGION}" \
-  --arg VIDEO_STREAM_PREFIX "${VIDEO_STREAM_PREFIX}" \
-  --arg VIDEO_HLS_EXPIRES_SECONDS "${VIDEO_HLS_EXPIRES_SECONDS}" \
-  --arg HLS_PROXY_PREFIX "${HLS_PROXY_PREFIX}" \
-  --arg HLS_PROXY_FETCH_TIMEOUT_SECONDS "${HLS_PROXY_FETCH_TIMEOUT_SECONDS}" \
-  --arg HLS_PROXY_PLAYLIST_MAX_BYTES "${HLS_PROXY_PLAYLIST_MAX_BYTES}" \
-  --arg HLS_PROXY_SEGMENT_MAX_BYTES "${HLS_PROXY_SEGMENT_MAX_BYTES}" \
   --arg STATE_BUCKET "${STATE_BUCKET}" \
   --arg SNAPSHOT_URL_EXPIRES_SECONDS "${SNAPSHOT_URL_EXPIRES_SECONDS}" \
   --arg DEMO_VIDEOS_PREFIX "${DEMO_VIDEOS_PREFIX}" \
   --arg DEMO_VIDEO_URL_EXPIRES_SECONDS "${DEMO_VIDEO_URL_EXPIRES_SECONDS}" \
-  --arg VIDEO_ONDEMAND_EXPIRES_SECONDS "${VIDEO_ONDEMAND_EXPIRES_SECONDS}" \
   --arg SITE_GEOHASH "${SITE_GEOHASH}" \
-  '{$TABLE_NAME, $GSI_NAME, $MAX_LIMIT, $VIDEO_AWS_REGION, $VIDEO_STREAM_PREFIX,
-    $VIDEO_HLS_EXPIRES_SECONDS, $HLS_PROXY_PREFIX,
-    $HLS_PROXY_FETCH_TIMEOUT_SECONDS, $HLS_PROXY_PLAYLIST_MAX_BYTES,
-    $HLS_PROXY_SEGMENT_MAX_BYTES, $STATE_BUCKET, $SNAPSHOT_URL_EXPIRES_SECONDS,
-    $DEMO_VIDEOS_PREFIX, $DEMO_VIDEO_URL_EXPIRES_SECONDS,
-    $VIDEO_ONDEMAND_EXPIRES_SECONDS, $SITE_GEOHASH}' >"${desired_vars_file}"
+  '{$TABLE_NAME, $GSI_NAME, $MAX_LIMIT, $STATE_BUCKET,
+    $SNAPSHOT_URL_EXPIRES_SECONDS, $DEMO_VIDEOS_PREFIX,
+    $DEMO_VIDEO_URL_EXPIRES_SECONDS, $SITE_GEOHASH}' >"${desired_vars_file}"
 
 environment_file="${WORKDIR}/environment.json"
 if [[ "${READ_LAMBDA_EXISTS}" == "true" ]]; then
   jq --slurpfile desired "${desired_vars_file}" \
-    '{Variables: ((.Configuration.Environment.Variables // {}) + $desired[0])}' \
+    '{Variables: (((.Configuration.Environment.Variables // {})
+      | del(.VIDEO_AWS_REGION, .VIDEO_STREAM_PREFIX, .VIDEO_HLS_EXPIRES_SECONDS,
+            .VIDEO_ONDEMAND_EXPIRES_SECONDS, .HLS_PROXY_PREFIX,
+            .HLS_PROXY_FETCH_TIMEOUT_SECONDS, .HLS_PROXY_PLAYLIST_MAX_BYTES,
+            .HLS_PROXY_SEGMENT_MAX_BYTES)) + $desired[0])}' \
     <<<"${READ_FUNCTION_JSON}" >"${environment_file}"
 
   current_timeout="$(jq -r '.Configuration.Timeout // 0' <<<"${READ_FUNCTION_JSON}")"
@@ -748,9 +649,8 @@ if [[ "${READ_LAMBDA_EXISTS}" == "true" ]]; then
     echo "Lambda configuration already matches; keeping it unchanged."
   fi
 
-  # Existing code tolerates additional environment variables, while the new
-  # artifact may require them. Reconcile configuration first so no invocation
-  # can observe new code with the old environment during an in-place update.
+  # Reconcile configuration first so no invocation can observe new code with
+  # stale environment during an in-place update.
   candidate_sha256="$(openssl dgst -sha256 -binary "${WORKDIR}/function.zip" | base64 -w 0)"
   current_sha256="$(jq -r '.Configuration.CodeSha256 // ""' <<<"${READ_FUNCTION_JSON}")"
   if [[ "${candidate_sha256}" != "${current_sha256}" ]]; then
@@ -787,12 +687,6 @@ if [[ "${ATTACH_DDB_READ_POLICY}" == "true" ]]; then
     --policy-document "file://${DESIRED_POLICY_FILE}" >/dev/null
 fi
 
-if [[ "${RECONCILE_LAMBDA}" == "true" ]]; then
-  aws s3api put-bucket-lifecycle-configuration \
-    --bucket "${STATE_BUCKET}" \
-    --expected-bucket-owner "${ACCOUNT_ID}" \
-    --lifecycle-configuration "file://${DESIRED_LIFECYCLE_FILE}"
-fi
 
 READ_LAMBDA_ARN="$(aws lambda get-function --function-name "${READ_LAMBDA_NAME}" --query Configuration.FunctionArn --output text)"
 
@@ -850,6 +744,17 @@ for route_key in "${ROUTE_KEYS[@]}"; do
   fi
 done
 
+for route_key in "${RETIRED_ROUTE_KEYS[@]}"; do
+  route_id="$(
+    jq -r --arg route_key "${route_key}" \
+      '.Items[]? | select(.RouteKey == $route_key) | .RouteId' \
+      <<<"${ROUTES_JSON}" | head -n 1
+  )"
+  if [[ -n "${route_id}" ]]; then
+    aws apigatewayv2 delete-route --api-id "${API_ID}" --route-id "${route_id}"
+  fi
+done
+
 stage_auto="$(
   jq -r --arg stage "${STAGE_NAME}" \
     '.Items[]? | select(.StageName == $stage) | .AutoDeploy' \
@@ -868,29 +773,19 @@ jq -n \
   --argjson current "${current_stage_route_settings}" \
   --arg direct_route_key "GET /video/session/{camera_id}" \
   --arg browser_route_key "GET /video/browser-session/{camera_id}" \
-  --argjson burst "${HLS_SESSION_THROTTLE_BURST}" \
-  --argjson rate "${HLS_SESSION_THROTTLE_RATE}" \
-  '$current + {($direct_route_key): (($current[$direct_route_key] // {}) + {
-    ThrottlingBurstLimit: $burst,
-    ThrottlingRateLimit: $rate
-  }), ($browser_route_key): (($current[$browser_route_key] // {}) + {
-    ThrottlingBurstLimit: $burst,
-    ThrottlingRateLimit: $rate
-  })}' >"${stage_route_settings_file}"
-stage_throttle_matches="$(
+  --arg proxy_route_key "GET /video/proxy/{token}/{resource_id}" \
+  --arg coverage_route_key "GET /video/coverage/{camera_id}" \
+  '$current
+   | del(.[$direct_route_key])
+   | del(.[$browser_route_key])
+   | del(.[$proxy_route_key])
+   | del(.[$coverage_route_key])' >"${stage_route_settings_file}"
+stage_route_settings_match="$(
   jq -r \
     --arg stage "${STAGE_NAME}" \
-    --arg direct_route_key "GET /video/session/{camera_id}" \
-    --arg browser_route_key "GET /video/browser-session/{camera_id}" \
-    --argjson burst "${HLS_SESSION_THROTTLE_BURST}" \
-    --argjson rate "${HLS_SESSION_THROTTLE_RATE}" \
-    'any(.Items[]?;
-      .StageName == $stage
-      and .RouteSettings[$direct_route_key].ThrottlingBurstLimit == $burst
-      and .RouteSettings[$direct_route_key].ThrottlingRateLimit == $rate
-      and .RouteSettings[$browser_route_key].ThrottlingBurstLimit == $burst
-      and .RouteSettings[$browser_route_key].ThrottlingRateLimit == $rate
-    )' <<<"${STAGES_JSON}"
+    --argjson desired "$(cat "${stage_route_settings_file}")" \
+    'any(.Items[]?; .StageName == $stage and (.RouteSettings // {}) == $desired)' \
+    <<<"${STAGES_JSON}"
 )"
 if [[ -z "${stage_auto}" ]]; then
   aws apigatewayv2 create-stage \
@@ -898,7 +793,7 @@ if [[ -z "${stage_auto}" ]]; then
     --stage-name "${STAGE_NAME}" \
     --route-settings "file://${stage_route_settings_file}" \
     --auto-deploy >/dev/null
-elif [[ "${stage_auto}" != "true" || "${stage_throttle_matches}" != "true" ]]; then
+elif [[ "${stage_auto}" != "true" || "${stage_route_settings_match}" != "true" ]]; then
   aws apigatewayv2 update-stage \
     --api-id "${API_ID}" \
     --stage-name "${STAGE_NAME}" \

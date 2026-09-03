@@ -28,31 +28,6 @@ export interface SnapshotHistoryEntry {
 	object_id: string;
 }
 
-export interface VideoSession {
-	cameraId: string;
-	streamName: string;
-	playbackMode: 'LIVE' | 'ON_DEMAND' | string;
-	hlsUrl: string;
-	delivery?: 'SAME_ORIGIN_PROXY' | 'DIRECT_KINESIS' | string;
-	expiresIn: number;
-	region: string;
-	start?: string;
-	end?: string;
-}
-
-export interface CoverageInterval {
-	start: string;
-	end: string;
-}
-
-export interface VideoCoverage {
-	cameraId: string;
-	start: string;
-	end: string;
-	intervals: CoverageInterval[];
-	fragmentCount: number;
-	truncated: boolean;
-}
 
 export interface TimelineEvent {
 	object_id: string;

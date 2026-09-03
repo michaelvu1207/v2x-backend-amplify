@@ -153,11 +153,10 @@ policy (or its proven absence) is also retained.
 Route-only recovery does not alter Lambda code, configuration, role, or
 resource policy.
 
-The dedicated deploy role intentionally has no `apigateway:DELETE`. Existing
-route/integration targets can be restored with `PATCH`, while newly created
-children remain as additive infrastructure during rollback. Exact deletion
-requires a separately reviewed break-glass principal and is not part of this
-recovery execution.
+Applying retired-route deletion requires a principal with
+`apigateway:DELETE`; the dedicated deploy role intentionally lacks that
+permission. Use a separately reviewed administrator for this one-way cutover.
+Rollback evidence still records the previous route definitions.
 
 Optional env vars for `provision-read-api.sh` include:
 
@@ -169,10 +168,10 @@ Optional env vars for `provision-read-api.sh` include:
 - `EXPECTED_CURRENT_STATE_HASH` (required for apply; copied from the reviewed plan)
 - `PLAN_ONLY` (defaults to `true`; apply requires an explicit `false`)
 
-Tracked read routes include `/detections/timeline`, `/video/coverage/{camera_id}`,
-and the opaque `/video/proxy/{token}/{resource_id}` route in addition to the
-state, snapshot, detection, demo-video, and HLS-session routes. After applying,
-capture route-to-integration parity with:
+Tracked read routes cover state, snapshots, detections, demo videos, and
+`/detections/timeline`. The provisioning script also deletes the four retired
+Kinesis video routes during reconciliation. After applying, capture
+route-to-integration parity with:
 
 ```bash
 api_id="$(aws apigatewayv2 get-apis \
@@ -309,58 +308,13 @@ cd infra/aws-cli
 AWS_PROFILE="your-profile" AWS_REGION=us-west-1 ./harden-state-bucket.sh
 ```
 
-## Video streams
+## Camera video
 
-Provision the Kinesis Video Streams in `us-west-2`:
-
-```bash
-cd infra/aws-cli
-AWS_PROFILE="your-profile" AWS_REGION=us-west-2 ./provision-video-streams.sh
-```
-
-Defaults:
-
-- Stream prefix: `v2x-backend-cam-`
-- Camera IDs: `ch1 ch2 ch3 ch4`
-- Retention: `24` hours requested; existing streams are left at their current retention if already higher
-
-The read API also exposes:
-
-- `GET /video/session/{camera_id}`
-- `GET /video/proxy/{token}/{resource_id}` (opaque URLs returned by the session endpoint)
-- `GET /video/coverage/{camera_id}?start=<ISO-8601>&end=<ISO-8601>`
-
-The session endpoint returns a short-lived same-origin proxy URL for `ch1`
-through `ch4`; it never returns the signed Kinesis URL. The Lambda stores the
-Kinesis session token in a private, encrypted `hls-proxy/v1/` state object,
-rewrites master and media playlists recursively, and authenticates each opaque
-child descriptor with a key derived from that unexposed session token. Proxy
-requests accept only the exact Kinesis Video origin and HLS resource allowlist,
-reject redirects, and cap playlists at 1 MiB and binary fragments at 4 MiB.
-Live sessions default to five minutes; archived sessions require both `start`
-and `end` and are limited to a 24-hour window. Expired proxy state is rejected
-and deleted when accessed. A bucket lifecycle rule for the dedicated
-`hls-proxy/v1/` prefix remains recommended as defense-in-depth cleanup for
-expired sessions that are never requested again.
-
-The 4 MiB raw-fragment limit is below Lambda's synchronous base64 response
-ceiling. Treat an observed larger fragment as a failed release gate requiring
-lower producer fragment size/bitrate or a streaming proxy service; do not raise
-the limit past the Lambda/API Gateway transport bound.
-
-An HTTP 200 or advancing MJPEG byte count does not prove a live source. HLS
-acceptance requires all four camera producer timestamps to remain recent and
-advance across two samples, real frame content to change, and the perception
-service to recover after a forced session expiry without accumulating
-`CLOSE_WAIT` sockets. The returned `hlsUrl` is safe to identify as a proxy URL,
-but do not retain the opaque token path in durable evidence:
-
-```bash
-for camera in ch1 ch2 ch3 ch4; do
-  curl -fsS "https://<api-id>.execute-api.us-west-1.amazonaws.com/video/session/${camera}" \
-    | jq '{cameraId,playbackMode,delivery,expiresIn,hlsUrlPresent:(.hlsUrl|type == "string" and length > 0)}'
-done
-```
+AWS does not provision or serve camera video. Live HLS and the recording
+archive both come from MediaMTX on path-rfs; see
+`scripts/ops/camera-relay/README.md`. The read API has no video-session,
+video-proxy, or video-coverage routes and its execution role has no Kinesis
+Video permissions.
 
 ## Cleanup
 

@@ -49,7 +49,7 @@
 			name: 'Field cameras',
 			where: 'Richmond Field Station pole, via the PeMS camera server',
 			accent: 'border-fuchsia-400/40 bg-fuchsia-400/5',
-			nodes: [{ title: '4 \u00d7 2560\u00d71920 H.264 cameras', detail: 'One RTSP session per camera into the RFS PC', mono: 'ch1 \u2013 ch4' }]
+			nodes: [{ title: '4 \u00d7 2560\u00d71920 H.264 cameras', detail: 'One RTSP session per camera into the RFS PC; video never leaves path-rfs', mono: 'ch1 \u2013 ch4' }]
 		}
 	];
 

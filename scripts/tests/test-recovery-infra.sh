@@ -229,7 +229,7 @@ API_ID=w0j9m7dgpg RECONCILE_LAMBDA=false ATTACH_DDB_READ_POLICY=false PLAN_ONLY=
   "$ROOT/infra/aws-cli/provision-read-api.sh" >"$TMP/read-api-plan.txt"
 assert_contains "$TMP/read-api-plan.txt" 'reconcileLambda=false'
 assert_contains "$TMP/read-api-plan.txt" 'KEEP existing Lambda code, configuration, role, and policy'
-assert_contains "$TMP/read-api-plan.txt" 'CREATE route GET /video/proxy/{token}/{resource_id}'
+assert_contains "$TMP/read-api-plan.txt" 'CREATE route GET /detections/timeline'
 if grep -Eq 'lambda (update-function|create-function|add-permission|remove-permission)' "$MOCK_AWS_LOG"; then
   fail 'route-only plan attempted a Lambda mutation'
 fi
@@ -260,7 +260,7 @@ PATH="$MOCK_BIN:$PATH" API_ID=w0j9m7dgpg RECONCILE_LAMBDA=true \
 ATTACH_DDB_READ_POLICY=false PLAN_ONLY=true \
   "$ROOT/infra/aws-cli/provision-read-api.sh" >"$TMP/read-api-unprivileged-plan.txt"
 assert_contains "$TMP/read-api-unprivileged-plan.txt" \
-  'BLOCKED FOR APPLY: HLS proxy state access has not been reconciled'
+  'KEEP IAM unchanged (ATTACH_DDB_READ_POLICY=false)'
 
 # IAM apply must be preceded by a real-state review hash.
 : >"$MOCK_AWS_LOG"

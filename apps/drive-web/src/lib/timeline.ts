@@ -1,9 +1,4 @@
-import type {
-	CoverageInterval,
-	DetectionItem,
-	TimelineEvent,
-	TimelineHistogramBucket
-} from './types';
+import type { DetectionItem, TimelineEvent, TimelineHistogramBucket } from './types';
 
 /** Length of one archive playback window requested from the read API. */
 export const PLAYBACK_WINDOW_MS = 15 * 60 * 1000;
@@ -156,32 +151,6 @@ export function layoutMarkers(
 	return markers;
 }
 
-export interface CoverageSegmentLayout {
-	x: number;
-	width: number;
-}
-
-export function layoutCoverage(
-	intervals: CoverageInterval[],
-	viewStartMs: number,
-	viewEndMs: number
-): CoverageSegmentLayout[] {
-	const span = viewEndMs - viewStartMs;
-	if (span <= 0) return [];
-	const segments: CoverageSegmentLayout[] = [];
-	for (const interval of intervals) {
-		const s = parseIsoMs(interval.start);
-		const e = parseIsoMs(interval.end);
-		if (s === null || e === null || e < viewStartMs || s > viewEndMs) continue;
-		const clampedStart = Math.max(s, viewStartMs);
-		const clampedEnd = Math.min(e, viewEndMs);
-		segments.push({
-			x: (clampedStart - viewStartMs) / span,
-			width: Math.max((clampedEnd - clampedStart) / span, 0.0005)
-		});
-	}
-	return segments;
-}
 
 export interface HistogramBarLayout {
 	x: number;
@@ -216,29 +185,6 @@ export function layoutHistogram(
 	return visible.map((bar) => ({ ...bar, intensity: bar.total / max }));
 }
 
-/** Merge sorted-ish coverage intervals (e.g. from chunked requests). */
-export function mergeCoverageIntervals(
-	intervals: CoverageInterval[],
-	toleranceMs = 15_000
-): CoverageInterval[] {
-	const parsed = intervals
-		.map((i) => ({ start: parseIsoMs(i.start), end: parseIsoMs(i.end) }))
-		.filter((i): i is { start: number; end: number } => i.start !== null && i.end !== null)
-		.sort((a, b) => a.start - b.start);
-	const merged: { start: number; end: number }[] = [];
-	for (const interval of parsed) {
-		const last = merged[merged.length - 1];
-		if (last && interval.start - last.end <= toleranceMs) {
-			if (interval.end > last.end) last.end = interval.end;
-		} else {
-			merged.push({ ...interval });
-		}
-	}
-	return merged.map((i) => ({
-		start: new Date(i.start).toISOString(),
-		end: new Date(i.end).toISOString()
-	}));
-}
 
 export function formatClock(epochMs: number): string {
 	return new Date(epochMs).toLocaleTimeString([], {

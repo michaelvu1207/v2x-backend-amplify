@@ -4,9 +4,7 @@ import type {
 	DetectionPage,
 	DetectionQueryMode,
 	DetectionTimeline,
-	LivePerceptionDetections,
-	VideoCoverage,
-	VideoSession
+	LivePerceptionDetections
 } from './types';
 
 export interface StateJson {
@@ -146,45 +144,6 @@ export async function listArchiveSegments(
 		.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
 }
 
-export async function fetchVideoSession(
-	cameraId: string,
-	archiveWindow?: { start: string; end: string }
-): Promise<VideoSession> {
-	const config = await loadRuntimeConfig();
-	const url = new URL(
-		`${config.apiBaseUrl.replace(/\/+$/, '')}/video/browser-session/${encodeURIComponent(cameraId)}`
-	);
-	if (archiveWindow) {
-		url.searchParams.set('start', archiveWindow.start);
-		url.searchParams.set('end', archiveWindow.end);
-	}
-	const response = await fetch(url, { cache: 'no-store' });
-
-	if (!response.ok) {
-		throw new Error(`Failed to fetch video session: ${await readErrorDetail(response)}`);
-	}
-
-	return (await response.json()) as VideoSession;
-}
-
-export async function fetchVideoCoverage(
-	cameraId: string,
-	window: { start: string; end: string }
-): Promise<VideoCoverage> {
-	const config = await loadRuntimeConfig();
-	const url = new URL(
-		`${config.apiBaseUrl.replace(/\/+$/, '')}/video/coverage/${encodeURIComponent(cameraId)}`
-	);
-	url.searchParams.set('start', window.start);
-	url.searchParams.set('end', window.end);
-	const response = await fetch(url, { cache: 'no-store' });
-
-	if (!response.ok) {
-		throw new Error(`Failed to fetch video coverage: ${await readErrorDetail(response)}`);
-	}
-
-	return (await response.json()) as VideoCoverage;
-}
 
 export async function fetchDetectionTimeline(options: {
 	start: string;

@@ -27,6 +27,7 @@ READ_POLICY_NAME="${READ_POLICY_NAME:-v2x-backend-detections-ddb-read}"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 
 echo "Cleaning up in ${AWS_REGION}..."
+echo "Camera video is local to path-rfs; this cleanup manages no Kinesis Video resources."
 
 if aws iot get-topic-rule --rule-name "${RULE_NAME}" >/dev/null 2>&1; then
   aws iot delete-topic-rule --rule-name "${RULE_NAME}" >/dev/null

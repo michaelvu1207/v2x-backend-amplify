@@ -5,8 +5,7 @@
 	import LiveVideoCard from '$lib/components/LiveVideoCard.svelte';
 	import TimelineStrip from '$lib/components/TimelineStrip.svelte';
 	import RecentDetectionsPanel from '$lib/components/RecentDetectionsPanel.svelte';
-	import { fetchDetectionTimeline, fetchVideoCoverage } from '$lib/api';
-	import { fetchCameraCoverageSequentially } from '$lib/video-coverage';
+	import { fetchDetectionTimeline } from '$lib/api';
 	import { loadRuntimeConfig, type RuntimeConfig } from '$lib/runtime-config';
 	import {
 		TIMELINE_SPAN_MS,
@@ -15,7 +14,7 @@
 		windowForCursor,
 		type PlaybackWindow
 	} from '$lib/timeline';
-	import type { DetectionTimeline, TimelineEvent, VideoCoverage } from '$lib/types';
+	import type { DetectionTimeline, TimelineEvent } from '$lib/types';
 
 	let runtimeConfig = $state<RuntimeConfig | null>(null);
 	let mode = $state<'live' | 'archive'>('live');
@@ -29,9 +28,7 @@
 	let primaryCameraId = $state('ch1');
 	let selectedObjectId = $state<string | null>(null);
 	let timeline = $state<DetectionTimeline | null>(null);
-	let coverageByCamera = $state<Record<string, VideoCoverage>>({});
 	let timelineError = $state<string | null>(null);
-	let coverageLoading = false;
 
 	let cameraIds = $derived(runtimeConfig?.videoCameraIds ?? ['ch1', 'ch2', 'ch3', 'ch4']);
 	// Quantised to 10s steps so playback doesn't re-query the DB on every tick.
@@ -46,7 +43,6 @@
 
 	let clockTimer: ReturnType<typeof setInterval> | null = null;
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
-	let coverageRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
 	async function loadTimeline() {
 		try {
@@ -63,34 +59,6 @@
 		}
 	}
 
-	async function loadCoverage() {
-		if (coverageLoading) return;
-		coverageLoading = true;
-		const end = Date.now();
-		const start = end - TIMELINE_SPAN_MS;
-		// The Lambda pages ListFragments sequentially and can't sweep 24h of
-		// ~2s fragments inside API Gateway's 30s limit — fan out 4h chunks
-		// per camera and merge the intervals client-side.
-		const CHUNK_MS = 4 * 60 * 60 * 1000;
-		try {
-			// Kinesis Video Streams applies ListFragments connection limits across
-			// the account, not only within one stream. Keep the optional coverage
-			// overlay globally sequential so it cannot disturb live HLS sessions.
-			const next: Record<string, VideoCoverage> = { ...coverageByCamera };
-			for (const cameraId of cameraIds) {
-				next[cameraId] = await fetchCameraCoverageSequentially(
-					cameraId,
-					start,
-					end,
-					CHUNK_MS,
-					fetchVideoCoverage
-				);
-			}
-			coverageByCamera = next;
-		} finally {
-			coverageLoading = false;
-		}
-	}
 
 	function goLive() {
 		mode = 'live';
@@ -157,7 +125,6 @@
 		viewEndMs = now;
 
 		void loadTimeline();
-		void loadCoverage();
 
 		clockTimer = setInterval(() => {
 			nowMs = Date.now();
@@ -170,16 +137,12 @@
 		refreshTimer = setInterval(() => {
 			void loadTimeline();
 		}, 60_000);
-		// Historical chunks are immutable and cached on aligned 4h boundaries;
-		// only the live-edge chunk is re-fetched. Five-minute freshness is enough
-		// for the optional gap overlay and avoids continuous ListFragments load.
-		coverageRefreshTimer = setInterval(() => void loadCoverage(), 5 * 60_000);
+		// Detection history is refreshed independently of local video archives.
 	});
 
 	onDestroy(() => {
 		if (clockTimer) clearInterval(clockTimer);
 		if (refreshTimer) clearInterval(refreshTimer);
-		if (coverageRefreshTimer) clearInterval(coverageRefreshTimer);
 	});
 </script>
 
@@ -280,7 +243,6 @@
 				events={timeline?.events ?? []}
 				histogram={timeline?.histogram ?? []}
 				bucketSeconds={timeline?.bucketSeconds ?? 60}
-				coverage={coverageByCamera[primaryCameraId]?.intervals ?? []}
 				{selectedObjectId}
 				onScrub={scrubTo}
 				onSelectEvent={handleSelectEvent}
