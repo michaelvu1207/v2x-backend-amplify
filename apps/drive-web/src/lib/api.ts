@@ -129,6 +129,7 @@ export async function listArchiveSegments(
 		archiveListUrl(config.archiveVideoBaseUrl, cameraId, start, end),
 		{ cache: 'no-store' }
 	);
+	if (response.status === 404) return [];
 	if (!response.ok) {
 		throw new Error(`Failed to list archive recordings: ${await readErrorDetail(response)}`);
 	}

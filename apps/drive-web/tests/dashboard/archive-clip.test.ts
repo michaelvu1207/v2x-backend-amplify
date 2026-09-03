@@ -72,6 +72,21 @@ describe('MediaMTX archive clips', () => {
 		);
 	});
 
+	it('treats MediaMTX no-segments responses as an empty archive window', async () => {
+		vi.mocked(fetch).mockResolvedValueOnce({
+			ok: false,
+			status: 404
+		} as Response);
+
+		await expect(
+			listArchiveSegments(
+				'ch1',
+				'2026-08-28T17:00:00.000Z',
+				'2026-08-28T17:15:00.000Z'
+			)
+		).resolves.toEqual([]);
+	});
+
 	it('maps native MP4 media time from the exact clip start', () => {
 		const startMs = Date.parse('2026-09-02T17:00:03.250Z');
 		expect(archiveEpochForMediaTime(startMs, 12.75)).toBe(
