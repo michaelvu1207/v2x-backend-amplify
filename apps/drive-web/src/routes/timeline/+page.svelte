@@ -210,6 +210,7 @@
 							windowStart={playbackWindow.start}
 							windowEnd={playbackWindow.end}
 							windowStartMs={playbackWindow.startMs}
+							archiveVideoBaseUrl={runtimeConfig?.archiveVideoBaseUrl || ''}
 							{cursorMs}
 							{seekNonce}
 							{playing}

@@ -14,6 +14,7 @@ export interface RuntimeConfig {
 	demoVideosPath: string;
 	videoCameraIds: string[];
 	liveVideoUrlTemplate: string;
+	archiveVideoBaseUrl: string;
 	perceptionStreamUrls: Record<string, string>;
 	perceptionStreamBaseUrl: string;
 	perceptionStreamPathTemplate: string;
@@ -35,6 +36,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
 	demoVideosPath: '/demo-videos',
 	videoCameraIds: ['ch1', 'ch2', 'ch3', 'ch4'],
 	liveVideoUrlTemplate: '',
+	archiveVideoBaseUrl: '',
 	perceptionStreamUrls: {},
 	perceptionStreamBaseUrl: '',
 	perceptionStreamPathTemplate: '/streams/{camera_id}.mjpg',
@@ -85,6 +87,7 @@ function normalizeConfig(config: Partial<RuntimeConfig>): RuntimeConfig {
 		demoVideosPath: withDefaultPath(config.demoVideosPath, DEFAULT_CONFIG.demoVideosPath),
 		videoCameraIds: config.videoCameraIds || DEFAULT_CONFIG.videoCameraIds,
 		liveVideoUrlTemplate: config.liveVideoUrlTemplate || DEFAULT_CONFIG.liveVideoUrlTemplate,
+		archiveVideoBaseUrl: (config.archiveVideoBaseUrl || DEFAULT_CONFIG.archiveVideoBaseUrl).replace(/\/+$/, ''),
 		perceptionStreamUrls: config.perceptionStreamUrls || DEFAULT_CONFIG.perceptionStreamUrls,
 		perceptionStreamBaseUrl: (config.perceptionStreamBaseUrl || DEFAULT_CONFIG.perceptionStreamBaseUrl).replace(/\/+$/, ''),
 		perceptionStreamPathTemplate:

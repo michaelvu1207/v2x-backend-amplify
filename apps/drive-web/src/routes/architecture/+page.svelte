@@ -41,7 +41,7 @@
 				{ title: 'Drive server', detail: 'Owns the CARLA tick (20 Hz sync mode), ego vehicle, cameras, scenarios; talks to the browser over WebSocket', mono: 'wss://drive.path2v2x.net/ws' },
 				{ title: 'Twin server', detail: 'SimForge OSS engine mirroring live detections; no CARLA involved', mono: 'wss://twin.path2v2x.net/twin' },
 				{ title: 'Perception (co-perception)', detail: 'YOLOv8 on the four pole cameras, GPS projection of every detection', mono: '/perception/ws' },
-				{ title: 'Camera relay (MediaMTX)', detail: 'H.264 pass-through of the cameras; low-latency HLS for browsers, RTSP for the twin, 7-day local recording', mono: '/camera/chN/index.m3u8' },
+				{ title: 'Camera relay (MediaMTX)', detail: 'H.264 pass-through; local low-latency HLS and 40-hour recording playback for browsers, RTSP for the twin', mono: '/camera/chN/index.m3u8 · /archive/' },
 				{ title: 'nginx + Let\u2019s Encrypt', detail: 'TLS termination for drive.path2v2x.net and twin.path2v2x.net', mono: ':443' }
 			]
 		},
@@ -56,7 +56,7 @@
 	const flows = [
 		{ from: 'Browser', to: 'Amplify (AWS)', what: 'Static site: HTML/JS/config.json', how: 'HTTPS' },
 		{ from: 'Browser', to: 'Drive server (RFS PC)', what: 'Drive session: controls, HUD, CARLA camera frames, twin view', how: 'wss://drive.path2v2x.net/ws' },
-		{ from: 'Browser', to: 'Camera relay (RFS PC)', what: 'Live camera video', how: 'https://drive.path2v2x.net/camera/chN/index.m3u8 (HLS)' },
+		{ from: 'Browser', to: 'Camera relay (RFS PC)', what: 'Live and archived camera video', how: '/camera/chN/index.m3u8 (HLS) · /archive/get (MP4)' },
 		{ from: 'Browser', to: 'HTTP API (AWS)', what: 'Detections, heartbeat, map data, demo videos', how: 'HTTPS JSON' },
 		{ from: 'Browser', to: 'Twin server (RFS PC)', what: 'Digital twin truth frames, camera feeds', how: 'wss://twin.path2v2x.net/twin' },
 		{ from: 'Cameras', to: 'RFS PC', what: 'Raw H.264 (one session per camera), fanned out on the host to perception, relay and recording', how: 'RTSP over TCP' },
@@ -120,7 +120,7 @@
 					{/each}
 				</div>
 				<p class="text-xs text-gray-500">
-					Browser &rarr; AWS for the site and data API; Browser &rarr; RFS PC for anything live (drive session, cameras, twin);
+					Browser &rarr; AWS for the site and data API; Browser &rarr; RFS PC for drive sessions, the twin, and both live and 40-hour archived camera video;
 					Cameras &rarr; RFS PC for video; RFS PC &rarr; AWS for detection records.
 				</p>
 			</section>

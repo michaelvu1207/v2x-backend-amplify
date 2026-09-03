@@ -54,18 +54,30 @@ cd /home/path/v2x-drive
 scripts/ops/camera-relay/install.sh
 ```
 
-MediaMTX binds RTSP to `127.0.0.1:8554` and low-latency HLS to
-`127.0.0.1:8888`. nginx publishes HLS as
-`https://<drive-or-twin-host>/camera/ch1/index.m3u8` through `ch4`. The checked-in
-firewall also drops new external connections to both loopback service ports.
-The dashboard runtime config key `liveVideoUrlTemplate` should be
-`https://drive.path2v2x.net/camera/{camera_id}/index.m3u8`; when it is empty the
-existing Kinesis browser-session API remains the fallback.
+MediaMTX binds RTSP to `127.0.0.1:8554`, low-latency HLS to
+`127.0.0.1:8888`, and recording playback to `127.0.0.1:9996`. nginx publishes
+live HLS as `https://<drive-or-twin-host>/camera/ch1/index.m3u8` through `ch4`
+and recording playback as `https://<drive-or-twin-host>/archive/`. The
+checked-in firewall drops new external connections to all loopback service
+ports. Set `liveVideoUrlTemplate` to
+`https://drive.path2v2x.net/camera/{camera_id}/index.m3u8` and
+`archiveVideoBaseUrl` to `https://drive.path2v2x.net/archive`. An empty live
+template preserves the Kinesis live-session fallback; an empty archive base
+preserves the Kinesis archive-session fallback during decommissioning.
+
+Both `/etc/nginx/sites-available/v2x-drive-public` and `v2x-twin` proxy
+`/archive/` to `http://127.0.0.1:9996/` with buffering disabled. Their CORS
+allow-list includes `https://path2v2x.net`, `https://www.path2v2x.net`,
+`https://drive.path2v2x.net`, and `https://twin.path2v2x.net`; archive playback
+does not use credentialed cookies.
 
 MediaMTX records 15-minute fMP4 segments beneath
-`/var/lib/v2x-camera/recordings` and removes them after seven days. Change
-`recordDeleteAfter` in `scripts/ops/camera-relay/mediamtx.yml`, rerun the
-installer, and restart the MediaMTX and relay units to change retention.
+`/var/lib/v2x-camera/recordings` and removes them after 40 hours. The measured
+four-camera rate is about 260 GB/day, so 40 hours requires about 433 GB (use
+approximately 430 GB as the recording budget) out of roughly 620 GB available.
+Longer retention requires more disk. Change `recordDeleteAfter` in
+`scripts/ops/camera-relay/mediamtx.yml`, rerun the installer, and restart the
+MediaMTX and relay units to change retention.
 
 Perception is installed from the separate `path2v2x/co-perception` checkout;
 nginx routes `/perception/ws` to its local socket on `127.0.0.1:8766`.

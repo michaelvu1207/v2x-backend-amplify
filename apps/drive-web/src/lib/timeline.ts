@@ -68,6 +68,11 @@ export function archiveMediaTimeForEpoch(
 	return Math.max(0, (epochMs - base) / 1000);
 }
 
+/** Map native archive MP4 media time to the recording's wall clock. */
+export function archiveEpochForMediaTime(clipStartMs: number, mediaTimeSeconds: number): number {
+	return clipStartMs + mediaTimeSeconds * 1000;
+}
+
 export function archiveCursorNeedsCorrection(
 	cursorMs: number,
 	currentEpochMs: number,

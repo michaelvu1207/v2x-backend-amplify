@@ -48,13 +48,16 @@ prefixed by a single channel byte. nginx routes `/perception/ws` to
 `127.0.0.1:8766` on path-rfs. Deployment configuration must point the dashboard's
 perception stream settings at endpoints produced by `co-perception`.
 
-Raw live video is served locally on path-rfs by the copy-only MediaMTX relay in
-`scripts/ops/camera-relay`: public paths `ch1` through `ch4` are available as
-low-latency HLS under `https://drive.path2v2x.net/camera/`. Set the dashboard
-runtime key `liveVideoUrlTemplate` to
-`https://drive.path2v2x.net/camera/{camera_id}/index.m3u8` to use it directly.
-An empty template preserves the existing Kinesis browser-session fallback, and
-the existing AWS Kinesis upload continues unchanged during the soak period.
+Live and archived raw video are served locally from path-rfs by the copy-only
+MediaMTX relay in `scripts/ops/camera-relay`. Public paths `ch1` through `ch4`
+are available as low-latency HLS under
+`https://drive.path2v2x.net/camera/`, while the Timeline reads the local
+40-hour recording archive under `https://drive.path2v2x.net/archive/`. Set
+`liveVideoUrlTemplate` to
+`https://drive.path2v2x.net/camera/{camera_id}/index.m3u8` and
+`archiveVideoBaseUrl` to `https://drive.path2v2x.net/archive`. Empty values
+preserve their Kinesis browser-session fallbacks while AWS video resources are
+being decommissioned.
 
 ## Local development
 

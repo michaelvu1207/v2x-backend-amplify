@@ -1,19 +1,21 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
 	import Hls from 'hls.js';
-	import { fetchVideoSession } from '$lib/api';
+	import { archiveClipUrl, fetchVideoSession, listArchiveSegments } from '$lib/api';
 	import {
 		archiveCursorNeedsCorrection,
+		archiveEpochForMediaTime,
 		archiveMediaTimeForEpoch,
 		formatClock
 	} from '$lib/timeline';
 
 	interface Props {
 		cameraId: string;
-		/** ISO window bounds; changing them loads a fresh ON_DEMAND session. */
+		/** ISO window bounds; changing them loads a fresh archive clip. */
 		windowStart: string;
 		windowEnd: string;
 		windowStartMs: number;
+		archiveVideoBaseUrl: string;
 		/** Target wall-clock position; bump seekNonce to force a seek. */
 		cursorMs: number;
 		seekNonce: number;
@@ -28,6 +30,7 @@
 		windowStart,
 		windowEnd,
 		windowStartMs,
+		archiveVideoBaseUrl,
 		cursorMs,
 		seekNonce,
 		playing,
@@ -38,12 +41,15 @@
 	let videoEl = $state<HTMLVideoElement | null>(null);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
+	let noRecording = $state(false);
 	let currentEpochMs = $state<number | null>(null);
 	let hls: Hls | null = null;
 	let loadedWindowKey = '';
-	// Maps media time (s) to wall clock: epochMs = pdtOffsetMs + mediaTime * 1000.
-	// Recomputed on every fragment change so discontinuities stay accurate.
+	let requestSerial = 0;
+	// KVS HLS maps media time through EXT-X-PROGRAM-DATE-TIME. A local MP4
+	// instead starts at localClipStartMs and needs no playlist timestamp.
 	let pdtOffsetMs: number | null = null;
+	let localClipStartMs: number | null = null;
 	let appliedSeekNonce = -1;
 
 	function destroyPlayer() {
@@ -51,74 +57,141 @@
 			hls.destroy();
 			hls = null;
 		}
+		if (videoEl) {
+			videoEl.pause();
+			videoEl.removeAttribute('src');
+			videoEl.load();
+		}
 		pdtOffsetMs = null;
-		loadedWindowKey = '';
+		localClipStartMs = null;
+		currentEpochMs = null;
 	}
 
 	function mediaTimeForEpoch(epochMs: number): number {
-		// Before the first fragment lands, use the playback window as a
+		const base = localClipStartMs;
+		if (base !== null) {
+			return Math.max(0, (epochMs - base) / 1000);
+		}
+		// Before the first KVS fragment lands, use the playback window as a
 		// provisional base. FRAG_CHANGED corrects this with the real PDT.
 		return archiveMediaTimeForEpoch(epochMs, pdtOffsetMs, windowStartMs);
 	}
 
+	async function loadLocalArchive(serial: number) {
+		const segments = await listArchiveSegments(cameraId, windowStart, windowEnd);
+		if (serial !== requestSerial || !videoEl) return;
+
+		const requestedEndMs = Date.parse(windowEnd);
+		const overlapping = segments
+			.map((segment) => {
+				const startMs = Date.parse(segment.start);
+				return { startMs, endMs: startMs + segment.duration * 1000 };
+			})
+			.filter(
+				(segment) => segment.endMs > windowStartMs && segment.startMs < requestedEndMs
+			);
+		if (overlapping.length === 0) {
+			noRecording = true;
+			return;
+		}
+
+		const clipStartMs = Math.max(
+			windowStartMs,
+			Math.min(...overlapping.map((segment) => segment.startMs))
+		);
+		const clipEndMs = Math.min(
+			requestedEndMs,
+			Math.max(...overlapping.map((segment) => segment.endMs))
+		);
+		if (clipEndMs <= clipStartMs) {
+			noRecording = true;
+			return;
+		}
+
+		localClipStartMs = clipStartMs;
+		videoEl.src = archiveClipUrl(
+			archiveVideoBaseUrl,
+			cameraId,
+			new Date(clipStartMs).toISOString(),
+			(clipEndMs - clipStartMs) / 1000
+		);
+		videoEl.load();
+	}
+
+	async function loadKinesisArchive(serial: number) {
+		const session = await fetchVideoSession(cameraId, { start: windowStart, end: windowEnd });
+		if (serial !== requestSerial || !videoEl) return;
+		if (Hls.isSupported()) {
+			hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+			hls.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
+				const pdt = data.frag.programDateTime;
+				if (pdt) {
+					pdtOffsetMs = pdt - data.frag.start * 1000;
+					if (videoEl) {
+						const target = mediaTimeForEpoch(cursorMs);
+						const currentEpoch = pdtOffsetMs + videoEl.currentTime * 1000;
+						if (archiveCursorNeedsCorrection(cursorMs, currentEpoch)) {
+							videoEl.currentTime = target;
+						}
+					}
+				}
+			});
+			hls.on(Hls.Events.ERROR, (_event, data) => {
+				if (data.fatal) {
+					error = `Playback error: ${data.details}`;
+				}
+			});
+			hls.loadSource(session.hlsUrl);
+			hls.attachMedia(videoEl);
+		} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+			videoEl.src = session.hlsUrl;
+		} else {
+			throw new Error('HLS playback is not supported in this browser');
+		}
+	}
+
 	async function loadWindow() {
-		const key = `${cameraId}|${windowStart}|${windowEnd}`;
+		const key = `${cameraId}|${windowStart}|${windowEnd}|${archiveVideoBaseUrl}`;
 		if (key === loadedWindowKey) return;
+		const serial = ++requestSerial;
 		loading = true;
 		error = null;
+		noRecording = false;
 		destroyPlayer();
 		loadedWindowKey = key;
 
 		try {
-			const session = await fetchVideoSession(cameraId, { start: windowStart, end: windowEnd });
-			if (!videoEl) throw new Error('Video element unavailable');
-			if (Hls.isSupported()) {
-				hls = new Hls({ enableWorker: true, lowLatencyMode: false });
-				hls.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
-					const pdt = data.frag.programDateTime;
-					if (pdt) {
-						pdtOffsetMs = pdt - data.frag.start * 1000;
-						// The initial seek runs before HLS has exposed its real PDT
-						// mapping. Correct it as soon as a timestamped fragment is
-						// active; otherwise archive video can remain seconds away from
-						// the replay clock until a later manual scrub.
-						if (videoEl) {
-							const target = mediaTimeForEpoch(cursorMs);
-							const currentEpoch = pdtOffsetMs + videoEl.currentTime * 1000;
-							if (archiveCursorNeedsCorrection(cursorMs, currentEpoch)) {
-								videoEl.currentTime = target;
-							}
-						}
-					}
-				});
-				hls.on(Hls.Events.ERROR, (_event, data) => {
-					if (data.fatal) {
-						error = `Playback error: ${data.details}`;
-					}
-				});
-				hls.loadSource(session.hlsUrl);
-				hls.attachMedia(videoEl);
-			} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-				videoEl.src = session.hlsUrl;
+			if (archiveVideoBaseUrl) {
+				await loadLocalArchive(serial);
 			} else {
-				throw new Error('HLS playback is not supported in this browser');
+				await loadKinesisArchive(serial);
 			}
+			if (serial !== requestSerial || !videoEl || noRecording) return;
 			videoEl.currentTime = mediaTimeForEpoch(cursorMs);
 			if (playing) {
 				await videoEl.play().catch(() => {});
 			}
 		} catch (err) {
+			if (serial !== requestSerial) return;
 			error = err instanceof Error ? err.message : 'Unknown playback error';
 			loadedWindowKey = '';
 		} finally {
-			loading = false;
+			if (serial === requestSerial) loading = false;
 		}
+	}
+
+	function handleLoadedMetadata() {
+		if (!videoEl) return;
+		videoEl.currentTime = mediaTimeForEpoch(cursorMs);
+		if (playing) void videoEl.play().catch(() => {});
 	}
 
 	function handleTimeUpdate() {
 		if (!videoEl) return;
-		const base = pdtOffsetMs ?? windowStartMs;
-		currentEpochMs = base + videoEl.currentTime * 1000;
+		currentEpochMs =
+			localClipStartMs === null
+				? (pdtOffsetMs ?? windowStartMs) + videoEl.currentTime * 1000
+				: archiveEpochForMediaTime(localClipStartMs, videoEl.currentTime);
 		if (isPrimary) {
 			onTimeUpdate?.(currentEpochMs);
 		}
@@ -127,27 +200,28 @@
 	$effect(() => {
 		void windowStart;
 		void windowEnd;
+		void archiveVideoBaseUrl;
 		if (videoEl) {
 			void loadWindow();
 		}
 	});
 
 	$effect(() => {
-		if (seekNonce === appliedSeekNonce || !videoEl) return;
+		if (seekNonce === appliedSeekNonce || !videoEl || noRecording) return;
 		appliedSeekNonce = seekNonce;
 		videoEl.currentTime = mediaTimeForEpoch(cursorMs);
 	});
 
 	// Followers drift-correct against the shared cursor instead of emitting time.
 	$effect(() => {
-		if (isPrimary || !videoEl || currentEpochMs === null) return;
+		if (isPrimary || !videoEl || currentEpochMs === null || noRecording) return;
 		if (archiveCursorNeedsCorrection(cursorMs, currentEpochMs)) {
 			videoEl.currentTime = mediaTimeForEpoch(cursorMs);
 		}
 	});
 
 	$effect(() => {
-		if (!videoEl) return;
+		if (!videoEl || noRecording) return;
 		if (playing) {
 			void videoEl.play().catch(() => {});
 		} else {
@@ -156,6 +230,7 @@
 	});
 
 	onDestroy(() => {
+		requestSerial += 1;
 		destroyPlayer();
 	});
 </script>
@@ -181,8 +256,15 @@
 		class="h-full w-full object-cover"
 		playsinline
 		muted
+		onloadedmetadata={handleLoadedMetadata}
 		ontimeupdate={handleTimeUpdate}
 	></video>
+
+	{#if noRecording}
+		<div class="absolute inset-0 flex items-center justify-center bg-black/75 px-4 text-center text-sm text-gray-300">
+			No recording for this window
+		</div>
+	{/if}
 
 	{#if loading}
 		<div class="absolute inset-0 flex items-center justify-center bg-black/45">

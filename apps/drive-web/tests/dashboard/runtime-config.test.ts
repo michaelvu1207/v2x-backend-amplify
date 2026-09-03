@@ -7,6 +7,7 @@ function jsonResponse(body: unknown, ok = true): Response {
 
 const staticConfig = {
 	apiBaseUrl: 'https://api.example.test',
+	archiveVideoBaseUrl: 'https://drive.example.test/archive/',
 	cloudflareDriveWsUrl: 'wss://static-drive.example.test',
 	tailscaleDriveWsUrl: 'wss://static-tail.example.test'
 };
@@ -28,6 +29,7 @@ describe('runtime config', () => {
 
 		const config = await loadRuntimeConfig();
 
+		expect(config.archiveVideoBaseUrl).toBe('https://drive.example.test/archive');
 		expect(config.cloudflareDriveWsUrl).toBe('wss://static-drive.example.test');
 		expect(config.tailscaleDriveWsUrl).toBe('wss://static-tail.example.test');
 		expect(fetchMock).toHaveBeenCalledTimes(1);

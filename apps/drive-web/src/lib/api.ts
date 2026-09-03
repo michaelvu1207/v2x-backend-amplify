@@ -84,6 +84,67 @@ async function readErrorDetail(response: Response): Promise<string> {
 	return detail;
 }
 
+export interface ArchiveSegment {
+	start: string;
+	duration: number;
+	url?: string;
+}
+
+export function archiveListUrl(
+	baseUrl: string,
+	cameraId: string,
+	start: string,
+	end: string
+): string {
+	const url = new URL(`${baseUrl.replace(/\/+$/, '')}/list`);
+	url.searchParams.set('path', cameraId);
+	url.searchParams.set('start', start);
+	url.searchParams.set('end', end);
+	return url.toString();
+}
+
+export function archiveClipUrl(
+	baseUrl: string,
+	cameraId: string,
+	start: string,
+	durationSeconds: number
+): string {
+	const url = new URL(`${baseUrl.replace(/\/+$/, '')}/get`);
+	url.searchParams.set('path', cameraId);
+	url.searchParams.set('start', start);
+	url.searchParams.set('duration', String(durationSeconds));
+	url.searchParams.set('format', 'mp4');
+	return url.toString();
+}
+
+export async function listArchiveSegments(
+	cameraId: string,
+	start: string,
+	end: string
+): Promise<ArchiveSegment[]> {
+	const config = await loadRuntimeConfig();
+	if (!config.archiveVideoBaseUrl) return [];
+
+	const response = await fetch(
+		archiveListUrl(config.archiveVideoBaseUrl, cameraId, start, end),
+		{ cache: 'no-store' }
+	);
+	if (!response.ok) {
+		throw new Error(`Failed to list archive recordings: ${await readErrorDetail(response)}`);
+	}
+
+	const segments = (await response.json()) as ArchiveSegment[];
+	return segments
+		.filter(
+			(segment) =>
+				typeof segment.start === 'string' &&
+				Number.isFinite(Date.parse(segment.start)) &&
+				Number.isFinite(segment.duration) &&
+				segment.duration > 0
+		)
+		.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+}
+
 export async function fetchVideoSession(
 	cameraId: string,
 	archiveWindow?: { start: string; end: string }

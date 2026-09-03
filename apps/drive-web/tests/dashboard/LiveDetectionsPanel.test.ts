@@ -33,6 +33,7 @@ const config: RuntimeConfig = {
 	demoVideosPath: '/demo-videos',
 	videoCameraIds: ['ch1'],
 	liveVideoUrlTemplate: '',
+	archiveVideoBaseUrl: '',
 	perceptionStreamUrls: {},
 	perceptionStreamBaseUrl: 'https://perception.example.test',
 	perceptionStreamPathTemplate: '/streams/{camera_id}.mjpg',

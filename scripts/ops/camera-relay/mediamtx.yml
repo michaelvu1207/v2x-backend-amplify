@@ -2,6 +2,9 @@ logLevel: info
 
 api: no
 
+playback: yes
+playbackAddress: 127.0.0.1:9996
+
 rtsp: yes
 rtspAddress: 127.0.0.1:8554
 rtspTransports: [tcp]
@@ -28,7 +31,7 @@ pathDefaults:
   recordPath: /var/lib/v2x-camera/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
   recordFormat: fmp4
   recordSegmentDuration: 15m
-  recordDeleteAfter: 168h
+  recordDeleteAfter: 40h
 
 paths:
   ch1: {}
