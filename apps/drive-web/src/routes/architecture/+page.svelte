@@ -41,7 +41,7 @@
 				{ title: 'Drive server', detail: 'Owns the CARLA tick (20 Hz sync mode), ego vehicle, cameras, scenarios; talks to the browser over WebSocket', mono: 'wss://drive.path2v2x.net/ws' },
 				{ title: 'Twin server', detail: 'SimForge OSS engine mirroring live detections; no CARLA involved', mono: 'wss://twin.path2v2x.net/twin' },
 				{ title: 'Perception (co-perception)', detail: 'YOLOv8 on the four pole cameras, GPS projection of every detection', mono: '/perception/ws' },
-				{ title: 'Camera relay (MediaMTX)', detail: 'H.264 pass-through; local low-latency HLS and 40-hour recording playback for browsers, RTSP for the twin', mono: '/camera/chN/index.m3u8 · /archive/' },
+				{ title: 'Camera relay (MediaMTX)', detail: 'H.264 pass-through; local low-latency HLS and 72-hour (3-day) recording playback from the archive NVMe for browsers, RTSP for the twin', mono: '/camera/chN/index.m3u8 · /archive/' },
 				{ title: 'nginx + Let\u2019s Encrypt', detail: 'TLS termination for drive.path2v2x.net and twin.path2v2x.net', mono: ':443' }
 			]
 		},
@@ -120,7 +120,7 @@
 					{/each}
 				</div>
 				<p class="text-xs text-gray-500">
-					Browser &rarr; AWS for the site and data API; Browser &rarr; RFS PC for drive sessions, the twin, and both live and 40-hour archived camera video;
+					Browser &rarr; AWS for the site and data API; Browser &rarr; RFS PC for drive sessions, the twin, and both live and 72-hour (3-day) archived camera video;
 					Cameras &rarr; RFS PC for video; RFS PC &rarr; AWS for detection records.
 				</p>
 			</section>

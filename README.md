@@ -51,9 +51,11 @@ perception stream settings at endpoints produced by `co-perception`.
 Live and archived raw video are served locally from path-rfs by the copy-only
 MediaMTX relay in `scripts/ops/camera-relay`. Public paths `ch1` through `ch4`
 are available as low-latency HLS under
-`https://drive.path2v2x.net/camera/`, while the Timeline reads the local
-40-hour recording archive under `https://drive.path2v2x.net/archive/`. Set
-`liveVideoUrlTemplate` to
+`https://drive.path2v2x.net/camera/`, while the Timeline reads the 72-hour
+(3-day) recording archive under `https://drive.path2v2x.net/archive/`. The
+archive lives on the second NVMe at `/mnt/archive/v2x-camera/recordings`; a
+10-minute guard deletes oldest segments if free space drops below 60 GB until
+80 GB is free. Set `liveVideoUrlTemplate` to
 `https://drive.path2v2x.net/camera/{camera_id}/index.m3u8` and
 `archiveVideoBaseUrl` to `https://drive.path2v2x.net/archive`. Both values are
 required for raw video; an empty value makes the corresponding card report

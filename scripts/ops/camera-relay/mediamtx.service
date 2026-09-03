@@ -2,6 +2,7 @@
 Description=V2X camera MediaMTX server
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor=/mnt/archive
 
 [Service]
 Type=simple
@@ -14,7 +15,7 @@ NoNewPrivileges=true
 PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/v2x-camera/recordings
+ReadWritePaths=/mnt/archive/v2x-camera/recordings
 
 [Install]
 WantedBy=multi-user.target

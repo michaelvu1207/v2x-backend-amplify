@@ -1,0 +1,15 @@
+[Unit]
+Description=Protect V2X camera archive free space
+RequiresMountsFor=/mnt/archive
+
+[Service]
+Type=oneshot
+User=v2x-camera
+Group=v2x-camera
+ExecStart=/opt/v2x-camera/archive-guard.sh
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/archive/v2x-camera/recordings

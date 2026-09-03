@@ -28,10 +28,10 @@ moq: no
 pathDefaults:
   source: publisher
   record: yes
-  recordPath: /var/lib/v2x-camera/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordPath: /mnt/archive/v2x-camera/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
   recordFormat: fmp4
   recordSegmentDuration: 15m
-  recordDeleteAfter: 40h
+  recordDeleteAfter: 72h
 
 paths:
   ch1: {}

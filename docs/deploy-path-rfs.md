@@ -73,12 +73,21 @@ allow-list includes `https://path2v2x.net`, `https://www.path2v2x.net`,
 does not use credentialed cookies.
 
 MediaMTX records 15-minute fMP4 segments beneath
-`/var/lib/v2x-camera/recordings` and removes them after 40 hours. The measured
-four-camera rate is about 260 GB/day, so 40 hours requires about 433 GB (use
-approximately 430 GB as the recording budget) out of roughly 620 GB available.
-Longer retention requires more disk. Change `recordDeleteAfter` in
-`scripts/ops/camera-relay/mediamtx.yml`, rerun the installer, and restart the
-MediaMTX and relay units to change retention.
+`/mnt/archive/v2x-camera/recordings` on the second NVMe and removes them after
+72 hours (3 days). Mount the existing ext4 filesystem before running the camera
+installer:
+
+```text
+UUID=aa97b6ff-ab06-42e5-a597-7613dae0376f /mnt/archive ext4 defaults,nofail,noatime 0 2
+```
+
+Create `/mnt/archive`, add that line to `/etc/fstab`, run `mount -a`, then create
+the recordings directory owned by `v2x-camera:v2x-camera` with mode `0750`.
+The measured four-camera rate is about 260 GB/day, so 72 hours requires about
+780 GB. The `v2x-archive-guard.timer` runs every 10 minutes; if free space on
+`/mnt/archive` falls below 60 GB, it deletes the oldest `.mp4` segments across
+all channels until 80 GB is free. The guard is restricted to the recordings
+directory.
 
 Perception is installed from the separate `path2v2x/co-perception` checkout;
 nginx routes `/perception/ws` to its local socket on `127.0.0.1:8766`.

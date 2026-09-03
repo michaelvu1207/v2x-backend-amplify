@@ -6,6 +6,7 @@ MEDIAMTX_SHA256="81b143f55a5d23d4a8c028d52869c14ea4a59919900528698fcc97a747fd69c
 MEDIAMTX_ARCHIVE="mediamtx_v${MEDIAMTX_VERSION}_linux_amd64.tar.gz"
 MEDIAMTX_URL="https://github.com/bluenviron/mediamtx/releases/download/v${MEDIAMTX_VERSION}/${MEDIAMTX_ARCHIVE}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SYSTEMD_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../../systemd" && pwd)
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "install.sh must run as root" >&2
@@ -17,7 +18,11 @@ if ! getent passwd v2x-camera >/dev/null; then
 fi
 
 install -d -o root -g v2x-camera -m 0750 /etc/v2x-camera /opt/v2x-camera
-install -d -o v2x-camera -g v2x-camera -m 0750 /var/lib/v2x-camera /var/lib/v2x-camera/recordings
+if ! mountpoint -q /mnt/archive; then
+  echo "/mnt/archive must be mounted before installing the camera relay" >&2
+  exit 1
+fi
+install -d -o v2x-camera -g v2x-camera -m 0750 /var/lib/v2x-camera /mnt/archive/v2x-camera/recordings
 
 installed_version=""
 if [ -x /usr/local/bin/mediamtx ]; then
@@ -36,10 +41,14 @@ fi
 
 install -o root -g v2x-camera -m 0640 "$SCRIPT_DIR/mediamtx.yml" /etc/v2x-camera/mediamtx.yml
 install -o root -g root -m 0755 "$SCRIPT_DIR/demux_to_rtsp.py" /opt/v2x-camera/demux_to_rtsp.py
+install -o root -g root -m 0755 "$SCRIPT_DIR/archive-guard.sh" /opt/v2x-camera/archive-guard.sh
 install -o root -g root -m 0644 "$SCRIPT_DIR/mediamtx.service" /etc/systemd/system/mediamtx.service
 install -o root -g root -m 0644 "$SCRIPT_DIR/v2x-camera-relay@.service" /etc/systemd/system/v2x-camera-relay@.service
+install -o root -g root -m 0644 "$SYSTEMD_DIR/v2x-archive-guard.service" /etc/systemd/system/v2x-archive-guard.service
+install -o root -g root -m 0644 "$SYSTEMD_DIR/v2x-archive-guard.timer" /etc/systemd/system/v2x-archive-guard.timer
 
 systemctl daemon-reload
 systemctl enable --now mediamtx.service \
   v2x-camera-relay@0.service v2x-camera-relay@1.service \
-  v2x-camera-relay@2.service v2x-camera-relay@3.service
+  v2x-camera-relay@2.service v2x-camera-relay@3.service \
+  v2x-archive-guard.timer
