@@ -7,7 +7,7 @@ LOW_WATER_BYTES=$((60 * 1024 * 1024 * 1024))
 HIGH_WATER_BYTES=$((80 * 1024 * 1024 * 1024))
 
 available_bytes() {
-  df -PB1 --output=avail "$ARCHIVE_MOUNT" | sed -n '$p' | tr -d ' '
+  df -B1 --output=avail "$ARCHIVE_MOUNT" | sed -n '$p' | tr -d ' '
 }
 
 if ! mountpoint -q "$ARCHIVE_MOUNT"; then
